@@ -45,7 +45,7 @@ class EmailFillCollector extends BaseCollector {
      * @returns {string}
      */
     id() {
-        return 'emailFillCollector';
+        return 'emailFill';
     }
 
     /**

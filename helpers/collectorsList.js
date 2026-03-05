@@ -47,6 +47,9 @@ module.exports = {
  * @property {import('../collectors/RequestCollector').RequestData[]=} requests
  * @property {string=} screenshots
  * @property {import('../collectors/TargetCollector').TargetData[]=} targets
+ * 
+ * NEW (ORI): har data type
+ * @property {import('../collectors/HarCollector').HARData | string=} har
  */
 
 /**
