@@ -1,0 +1,17 @@
+{
+    "output": "./data/captures",
+    "logPath": "./data/log",
+    "crawlers": 12,
+    "maxLoadTimeMs": 5000,
+    "extraExecutionTimeMs": 1000,
+    "verbose": true,
+    "forceOverwrite": true,
+    "filterOutFirstParty": false,
+    "emulateMobile": false,
+    "disableAntiBot": true,
+    "regionCode": "ES",
+    "chromiumVersion": "146.0.7680.31",
+    "dataCollectors": ["apis", "cookies", "cookiepopups", "emailFill", "har", "requests", "screenshots", "targets", "trace"],
+    "reporters": ["cli", "file", "html"],
+    "urls": ["https://example.com"]
+}
