@@ -1,0 +1,15 @@
+{
+    "_comment": "Alternate identity for emailFill crawl batches. Swap via IDENTITY_FILE env var or collectorFlags.identityFile to vary the persona across runs.",
+
+    "email"     : "james.harper.crawl@example.com",
+    "firstName" : "James",
+    "lastName"  : "Harper",
+    "fullName"  : "James Harper",
+    "phone"     : "3125550184",
+    "zip"       : "60601",
+    "dob"       : "1987-03-22",
+    "gender"    : "Male",
+    "country"   : "United States",
+    "state"     : "Illinois",
+    "freeText"  : "Just browsing"
+}

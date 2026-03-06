@@ -176,17 +176,19 @@ Register every new collector in `helpers/collectorsList.js`, `crawlerConductor.j
 
 ## Custom Collectors
 
-### `emailFill` Collector
+### emailFill Collector
 
-> **File:** `collectors/EmailFillCollector.js` · **ID:** `emailFill`
+> ⚠️ Work in progress
+
+File: collectors/EmailFillCollector.js · ID: emailFill
 
 Finds newsletter and email signup forms on a page and submits them using human-like CDP interactions to avoid bot detection.
 
 #### How it works
 
-1. After page load, tries to find and fill an email form on the current page.
-2. If none is found, scans links for newsletter-related keywords and visits up to 6 candidate pages.
-3. On each candidate: checks for captcha first (skips if found), fills required ancillary fields (selects, checkboxes), types the email with realistic keystroke timing, then clicks submit.
+After page load, tries to find and fill an email form on the current page.
+If none is found, scans links for newsletter-related keywords and visits up to 6 candidate pages.
+On each candidate: checks for CAPTCHA (records type but continues regardless), fills required ancillary fields (selects, checkboxes), types the email with realistic keystroke timing, then clicks submit.
 
 #### Registration
 
@@ -202,15 +204,47 @@ module.exports = { …, EmailFillCollector };
 emailFill?: {
     filled: boolean;
     captchaPresent: boolean;
+    captchaBlocked: boolean;
+    submissionSucceeded: boolean;
     formUrl: string | null;
     visitedLinks: string[];
     error: string | null;
 };
 ```
 
-#### Usage
+#### Identity configuration
 
-Set the target email address in `helpers/emails.js` first, then:
+The email address and form-fill identity (name, phone, date of birth, etc.) are loaded from a JSON file in helpers/emailHelpers/identities/.
+To switch identity, edit the single line in helpers/emailHelpers/emailFill.config.json:
+
+```json
+{ "identity": "identity.james.json" }
+```
+
+The value is just the filename — no path needed. Two identities are included (identity.laura.json, identity.james.json); add more by dropping new JSON files in the identities/ folder.
+
+For a one-off override without editing the config (e.g. in CI):
+```sh
+IDENTITY_FILE=/absolute/path/to/identity.json npm run crawl -- …
+```
+
+Identity schema — email is required, all other fields are optional (default to empty string):
+
+| Field | Required | Example |
+|---|---|---|
+| email | ✓ | "laura.mitchell@example.com" |
+| firstName | | "Laura" |
+| lastName | | "Mitchell" |
+| fullName | | "Laura Mitchell" |
+| phone | | "2025550173" |
+| zip | | "10001" |
+| dob | | "1990-06-15" |
+| gender | | "Female" |
+| country | | "United States" |
+| state | | "New York" |
+| freeText | | "General inquiry" |
+
+#### Usage
 
 ```sh
 npm run crawl -- -u "https://example.com" -d emailFill -v -o ./data/captures
@@ -220,15 +254,52 @@ npm run crawl -- -u "https://example.com" -d emailFill -v -o ./data/captures
 
 | Field | Type | Description |
 |---|---|---|
-| `filled` | `boolean` | `true` if a form was submitted |
-| `captchaPresent` | `boolean` | `true` if a captcha was detected on any visited page |
-| `formUrl` | `string\|null` | URL where submission occurred |
-| `visitedLinks` | `string[]` | Candidate pages navigated to |
-| `error` | `string\|null` | Unhandled exception message, if any |
+| filled | boolean | true if a form was submitted (legacy alias for submissionSucceeded) |
+| submissionSucceeded | boolean | true if submit was dispatched successfully |
+| captchaPresent | boolean | true if a CAPTCHA was detected on any visited page |
+| captchaBlocked | boolean | true only if a CAPTCHA prevented submission entirely |
+| formUrl | string\|null | URL where submission occurred |
+| visitedLinks | string[] | Candidate pages navigated to |
+| error | string\|null | Unhandled exception message, if any |
 
 #### Form detection
 
-Forms are scored by keyword density (`newsletter`, `subscribe`, `signup`, …) across `textContent`, `id`, `class`, and `action`. Forms containing `password`, `login`, `checkout`, or `payment` fields are disqualified. The email input is matched by `type="email"` or `name`/`placeholder`/`id` containing `email`. Standalone inputs outside a `<form>` (common in footers) are supported as a fallback.
+Forms are scored by keyword density (newsletter, subscribe, signup, …) across textContent, id, class, and action. Forms containing password, login, checkout, or payment fields are disqualified. The email input is matched by type="email" or name/placeholder/id containing email. Standalone inputs outside a `<form>` (common in footers) are supported as a fallback.
+
+#### Consent wall handling (work in progress)
+
+The crawler never genuinely accepts consent — it suppresses consent walls to reach the newsletter form underneath.
+
+Two layers run automatically:
+
+1. **Pre-render injection** — fires before the first page paint by setting well-known CMP cookies (OneTrust, Didomi, Cookiebot) and localStorage flags. Prevents most walls from mounting at all.
+2. **Runtime click fallback** — if a wall survived the injection (e.g. server-side verified CMPs), the crawler clicks its dismiss button and waits 1500 ms before continuing. Only buttons whose text unambiguously matches "accept all" in multiple languages are targeted — paywall and registration buttons are explicitly excluded.
+
+Known limitation: sites that re-render the consent wall after each navigation may still intermittently block access.
+
+#### Cross-origin iframe forms (work in progress)
+
+Some newsletter forms are embedded in cross-origin iframes (e.g. a publisher's subscription subdomain served inside the main site). The main page frame cannot see their DOM, which previously caused the wrong button to be clicked.
+
+`addTarget()` now collects a CDP session for every non-noise iframe. If form detection returns nothing in the main frame, each iframe session is probed in turn. Whichever session owns the form is used for all subsequent steps — field filling, ancillary fields, and submit all run in the correct frame context.
+
+Known third-party iframes that are skipped: reCAPTCHA, hCaptcha, Cloudflare Turnstile, Google Tag Manager, Google Analytics, DoubleClick, Facebook plugins, YouTube embeds.
+
+Known limitation: deeply nested iframes (iframe inside iframe) are not probed.
+
+#### Submit button / scroll fix (work in progress)
+
+`getBoundingClientRect()` returns viewport-relative coordinates at the moment of the call. If the submit button is below the fold, the raw coordinates point to empty space and the CDP click misses. `FormSubmitter` now calls `scrollIntoView()` on the resolved button before clicking, then re-reads the rect to get updated viewport coordinates.
+
+#### Ancillary field filling
+
+| Field type | Strategy |
+|---|---|
+| Date-of-birth selects | Detects day/month/year selects by name/id/aria-label hints (EN/ES/FR/DE) and picks the option matching identity.dob (YYYY-MM-DD), tolerating zero-padding differences |
+| Other selects | First non-empty, non-zero option |
+| Consent checkboxes | Checked if label matches a multilingual privacy/ToS regex (EN/ES/FR/DE/IT/PT); skipped if label signals opt-out |
+| Text inputs | Mapped to identity fields by name/id/placeholder hints; required unmatched inputs receive identity.freeText |
+| Honeypots | Inputs with zero bounding rect are skipped |
 
 #### Human simulation
 
@@ -236,23 +307,32 @@ Forms are scored by keyword density (`newsletter`, `subscribe`, `signup`, …) a
 |---|---|
 | Mouse movement | 8-step interpolated path with pixel-level noise, starting from a random offset |
 | Pre-fill wander | Mouse visits 3 random viewport coordinates before touching the form |
-| Typing | Per-character `keyDown` + `insertText` + `keyUp`, 60–180 ms between keystrokes, ~5% hesitation pauses |
-| SPA compatibility | Fires `input`, `change`, `blur` via native `HTMLInputElement` value setter after typing |
+| Typing | Per-character keyDown + insertText + keyUp, 60–180 ms between keystrokes, ~5% hesitation pauses |
+| SPA compatibility | Fires input, change, blur via native HTMLInputElement value setter after typing |
 | Pre-submit pause | 600–1200 ms random wait before clicking |
 
-#### Captcha detection
+#### CAPTCHA behaviour
 
-Checked before any interaction. The page is skipped if any of these selectors match: `iframe[src*="recaptcha"]`, `iframe[src*="hcaptcha"]`, `iframe[src*="turnstile"]`, `.g-recaptcha`, `.h-captcha`, `[data-sitekey]`, `#cf-turnstile`, `.cf-turnstile`.
+CAPTCHA type is detected and recorded but never causes the page to be skipped. Submission is always attempted:
+
+- Score-based (reCAPTCHA v3, Cloudflare Turnstile) — run invisibly; the form may still accept the submission with a low score.
+- Checkbox (reCAPTCHA v2, hCaptcha) — will block server-side; the attempt is still made so the HAR collector captures the server response.
+
+Detected via: `iframe[src*="recaptcha"]`, `iframe[src*="hcaptcha"]`, `iframe[src*="turnstile"]`, `.g-recaptcha`, `.h-captcha`, `[data-sitekey]`, `#cf-turnstile`, `.cf-turnstile`.
 
 #### Tunable constants
 
-`NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (6) · `POST_NAVIGATE_DELAY` (4500 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
+`NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (6) · `POST_NAVIGATE_DELAY` (4500 ms) · `POST_SUBMIT_DELAY` (3000 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
+
+All constants are in helpers/emailHelpers/constants.js.
 
 #### Known limitations
 
-- Forms revealed by a click or modal may be missed.
+- Forms revealed by a click, scroll, or modal may be missed.
 - Multi-step signup flows are not supported.
 - `filled: true` means submit was dispatched, not that the server accepted it.
+- Consent walls verified server-side may re-render after navigation and block access intermittently.
+- Deeply nested iframes (iframe inside iframe) are not probed for forms.
 
 ---
 

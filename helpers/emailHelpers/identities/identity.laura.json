@@ -1,0 +1,15 @@
+{
+    "_comment": "Fake identity for emailFill crawl batches. All values are fictional and internally consistent. Switch files between batches to vary the identity. Email must be a real inbox you control for double-opt-in tracking, or a catch-all address.",
+
+    "email"     : "laura.mitchell.crawl@example.com",
+    "firstName" : "Laura",
+    "lastName"  : "Mitchell",
+    "fullName"  : "Laura Mitchell",
+    "phone"     : "2025550173",
+    "zip"       : "10001",
+    "dob"       : "1990-06-15",
+    "gender"    : "Female",
+    "country"   : "United States",
+    "state"     : "New York",
+    "freeText"  : "General inquiry"
+}
