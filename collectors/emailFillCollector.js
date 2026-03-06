@@ -1,6 +1,7 @@
 'use strict';
 
 const BaseCollector = require('./BaseCollector');
+const EMAIL = require("../helpers/emails")
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ class EmailFillCollector extends BaseCollector {
         this._browserConnection = browserConnection;
         this._url               = url;
         this._log               = log;
-        this._email             = (collectorFlags && collectorFlags['emailAddress']) || 'test@example.com';
+        this._email             = EMAIL.EMAIL;
         this._mainSession       = null;
 
         /** @type {{ visitedLinks: string[], filled: boolean, captchaPresent: boolean, formUrl: string|null, error: string|null }} */
