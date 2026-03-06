@@ -1,15 +1,39 @@
-# DuckDuckGo Tracker Radar Collector - ID Graph
-Modified version of tracker radar collector
+# Tracker Radar Collector — ID Graph Fork
 
-## Quick start
+A web crawling framework for large-scale, automated data collection from websites. This project is a modified fork of [DuckDuckGo's Tracker Radar Collector](https://github.com/duckduckgo/tracker-radar-collector), extended with custom collectors designed for identity graph and email tracking research.
+
+The original tool was built to power DuckDuckGo's Tracker Radar dataset by crawling sites and recording network requests, cookies, API calls, and other signals. This fork preserves that foundation and adds purpose-built collectors for newsletter form interaction and full HTTP archive capture.
+
+At a high level, the crawler launches headless Chromium instances, navigates to each target URL over the Chrome DevTools Protocol (CDP), runs a configurable set of data collectors during and after page load, and writes structured JSON output per site.
 
 ```sh
-git clone git@github.com:duckduckgo/tracker-radar-collector.git
+# Quick start — crawl a single URL with all collectors
+git clone <this-repo>
 npm i
 npm run crawl -- -u "https://example.com" -o ./data/ -v
 ```
 
-## CLI options
+---
+
+## Table of Contents
+
+1. [CLI Reference](#cli-reference)
+2. [Architecture](#architecture)
+   - [Pipeline Overview](#pipeline-overview)
+   - [CLI — `crawl/index.js`](#cli--crawlindexjs)
+   - [Crawler Conductor — `crawlerConductor.js`](#crawler-conductor--crawlerconductorjs)
+   - [Crawler — `crawler.js`](#crawler--crawlerjs)
+   - [Collectors](#collectors)
+   - [Reporters](#reporters)
+3. [Custom Collectors](#custom-collectors)
+   - [`emailFill` Collector](#emailfill-collector)
+   - [`har` Collector](#har-collector)
+4. [Output Format](#output-format)
+5. [Creating a Collector](#creating-a-collector)
+
+---
+
+## CLI Reference
 
 | Flag | Description |
 |---|---|
@@ -29,67 +53,122 @@ npm run crawl -- -u "https://example.com" -o ./data/ -v
 | `--chromium-version <version>` | Custom Chromium version |
 | `--selenium-hub <url>` | Use remote Selenium hub |
 | `--config <path>` | Path to JSON config file |
-| `--autoconsent-action <action>` | `optIn` or `optOut` (requires `cookiepopups`) |
-
-## Programmatic usage
-
-```js
-const { crawlerConductor, crawler } = require('tracker-radar-collector');
-const { RequestCollector, CookieCollector } = require('tracker-radar-collector');
-
-// Multiple URLs
-crawlerConductor({
-    urls: ['https://example.com', …],
-    dataCallback: (url, result) => { … },
-    dataCollectors: [new RequestCollector(), new CookieCollector()],
-    numberOfCrawlers: 12,
-    filterOutFirstParty: true,
-    emulateMobile: false,
-    maxLoadTimeMs: 30000,
-    extraExecutionTimeMs: 2500,
-});
-
-// Single URL
-const data = await crawler(new URL('https://example.com'), {
-    collectors: [new RequestCollector()],
-    log: console.log,
-    maxLoadTimeMs: 30000,
-});
-```
-
-## Output format
-
-Each crawled site produces a JSON file named after the domain. Schema is defined in `crawler.js` (`CollectResult`). A `metadata.json` summarising the crawl configuration is also written per run.
-
-## Creating a collector
-
-Extend `BaseCollector` and implement:
-
-| Method | Required | Description |
-|---|---|---|
-| `id()` | ✅ | Unique string identifier |
-| `getData(options)` | ✅ | Return collected data. `options` provides `finalUrl` and `filterFunction` |
-| `init(options)` | — | Called before crawl begins |
-| `addTarget(session, targetInfo)` | — | Called for each new CDP target (page, iframe, worker) |
-| `postLoad()` | — | Called after page load, before `extraExecutionTimeMs` wait |
-
-Register every new collector in `crawlerConductor.js`, `main.js`, and optionally extend `CollectorData` in `collectorsList.js` for full type coverage.
+| `--autoconsent-action <action>` | `optIn` or `optOut` (requires `cookiepopups` collector) |
 
 ---
 
-## `emailFill` Collector
+## Architecture
+
+### Pipeline Overview
+
+Every crawl moves through three sequential layers. Collectors and reporters plug in at the sides.
+
+```
+CLI (crawl/index.js)
+    │  resolves config, filters URLs, sets up output paths
+    ▼
+CrawlerConductor (crawlerConductor.js)
+    │  concurrency control, retries, Chromium download
+    ▼
+Crawler (crawler.js)
+    │  CDP session management, page lifecycle, timeouts
+    │
+    ├── Collectors[]   (data extraction plugins)
+    └── Reporters[]    (output / logging plugins)
+```
+
+---
+
+### CLI — `crawl/index.js`
+
+Entry point for all crawls. Responsibilities:
+
+- Parses CLI flags via `commander` and merges them with an optional JSON config file (`crawlConfig.figureOut`).
+- Instantiates collectors and reporters by string ID from their respective registries.
+- Filters the input URL list, skipping URLs whose output file already exists (unless `-f` is set).
+- After each successful crawl, splits large data out of the main JSON: screenshots are saved as `.jpg` and HAR data as `.har`, with only the file path kept in the JSON.
+- Writes a `metadata.json` at the end of every run summarising configuration, timing, and success/failure counts.
+
+---
+
+### Crawler Conductor — `crawlerConductor.js`
+
+Manages parallel execution across all input URLs. Responsibilities:
+
+- Spawns up to `floor(cores × 0.8)` concurrent crawlers by default, capped at the number of input URLs. Override with `-c`.
+- Downloads the correct Chromium binary **once**, before any parallel work begins.
+- Runs each URL through `crawlAndSaveData`, which wraps the core crawler call.
+- On failure, automatically retries up to **2 times**. Async stack traces are disabled on retries as they can themselves cause crashes.
+- Supports per-URL collector overrides: different URLs in the same batch can run different collectors.
+
+---
+
+### Crawler — `crawler.js`
+
+Core crawl logic, built directly on the Chrome DevTools Protocol via Puppeteer's `CDPSession`. A `Crawler` instance orchestrates the full lifecycle for a single URL:
+
+1. **Target attachment** — Sets up CDP auto-attach recursively for all target types: pages, iframes, workers, shared workers, and service workers. Each new target gets its own session with user-agent override, viewport emulation, dialog dismissal, and the anti-bot script injected if enabled.
+2. **Collector init** — Calls `collector.init()` on every collector before navigation begins.
+3. **Navigation** — Sends `Page.navigate` and waits for `networkIdle` on the main frame. On timeout, calls `Page.stopLoading` and continues rather than failing hard.
+4. **Post-load** — Calls `collector.postLoad()`, then waits `extraExecutionTimeMs` (default 2500 ms) for the page to settle.
+5. **Data extraction** — Calls `collector.getData()` on each collector and assembles results into a keyed object.
+6. **Timeout enforcement** — A hard outer timeout of `maxLoadTimeMs × 2 + collectorExtraTime` prevents any single URL from hanging the queue.
+
+First-party filtering (`--only-3p`) is applied via `isThirdPartyRequest`, which compares eTLD+1 of the document against each request URL using `tldts`.
+
+---
+
+### Collectors
+
+Collectors are the data extraction plugins. Each extends `BaseCollector` and is identified by a unique string `id()`. They are registered in `helpers/collectorsList.js`.
+
+The lifecycle a collector sees per crawl:
+
+```
+init(options)
+    │  called once before navigation; use to set up state
+    ▼
+addTarget(session, targetInfo)   [called N times — once per page, iframe, worker…]
+    │  subscribe to CDP events here
+    ▼
+postLoad()
+    │  called after networkIdle; trigger any post-load interactions
+    ▼
+getData({ finalUrl, urlFilter })
+    │  return the collected data object
+```
+
+---
+
+### Reporters
+
+Reporters handle all user-facing output. Each extends `BaseReporter` and receives three lifecycle hooks:
+
+| Hook | When |
+|---|---|
+| `init({ verbose, startTime, urls, logPath })` | Before the crawl batch starts |
+| `update({ site, successes, failures, … })` | After each URL completes or fails |
+| `cleanup({ startTime, endTime, successes, … })` | After the entire batch finishes |
+
+The default reporter is `cli` (progress display + console logging). Multiple reporters can be active simultaneously via `--reporters cli,file`.
+
+---
+
+## Custom Collectors
+
+### `emailFill` Collector
 
 > **File:** `collectors/EmailFillCollector.js` · **ID:** `emailFill`
 
-Finds newsletter / email-signup forms and submits them using human-like CDP interactions to avoid bot detection.
+Finds newsletter and email signup forms on a page and submits them using human-like CDP interactions to avoid bot detection.
 
-### How it works
+#### How it works
 
 1. After page load, tries to find and fill an email form on the current page.
-2. If none found, scans links for newsletter-related keywords and visits up to 6 candidate pages.
+2. If none is found, scans links for newsletter-related keywords and visits up to 6 candidate pages.
 3. On each candidate: checks for captcha first (skips if found), fills required ancillary fields (selects, checkboxes), types the email with realistic keystroke timing, then clicks submit.
 
-### Registration
+#### Registration
 
 ```js
 // crawlerConductor.js
@@ -101,19 +180,23 @@ module.exports = { …, EmailFillCollector };
 
 // collectorsList.js — CollectorData type
 emailFill?: {
-    filled: boolean; captchaPresent: boolean;
-    formUrl: string | null; visitedLinks: string[]; error: string | null;
+    filled: boolean;
+    captchaPresent: boolean;
+    formUrl: string | null;
+    visitedLinks: string[];
+    error: string | null;
 };
 ```
 
-### Usage
-First modify email in helpers/emails.js to enter a e-mail address then exectue the command below (use -f to overwrite). Also can be run using option --config.
+#### Usage
+
+Set the target email address in `helpers/emails.js` first, then:
+
 ```sh
-# CLI — pass emailAddress via config file
- npm run crawl -- -u "https://example.com" -d emailFill -v -o ./data/captures
+npm run crawl -- -u "https://example.com" -d emailFill -v -o ./data/captures
 ```
 
-### Output
+#### Output
 
 | Field | Type | Description |
 |---|---|---|
@@ -123,11 +206,11 @@ First modify email in helpers/emails.js to enter a e-mail address then exectue t
 | `visitedLinks` | `string[]` | Candidate pages navigated to |
 | `error` | `string\|null` | Unhandled exception message, if any |
 
-### Form detection
+#### Form detection
 
-Forms are scored by keyword density (`newsletter`, `subscribe`, `signup`, …) across `textContent`, `id`, `class`, and `action`. Forms with `password`, `login`, `checkout`, or `payment` fields are disqualified. The email input is matched by `type="email"` or `name`/`placeholder`/`id` containing `email`. Standalone inputs outside a `<form>` (common in footers) are supported as a fallback.
+Forms are scored by keyword density (`newsletter`, `subscribe`, `signup`, …) across `textContent`, `id`, `class`, and `action`. Forms containing `password`, `login`, `checkout`, or `payment` fields are disqualified. The email input is matched by `type="email"` or `name`/`placeholder`/`id` containing `email`. Standalone inputs outside a `<form>` (common in footers) are supported as a fallback.
 
-### Human simulation
+#### Human simulation
 
 | Behaviour | Detail |
 |---|---|
@@ -137,35 +220,35 @@ Forms are scored by keyword density (`newsletter`, `subscribe`, `signup`, …) a
 | SPA compatibility | Fires `input`, `change`, `blur` via native `HTMLInputElement` value setter after typing |
 | Pre-submit pause | 600–1200 ms random wait before clicking |
 
-### Captcha detection
+#### Captcha detection
 
-Checked before any interaction. Skips the page if any of these match: `iframe[src*="recaptcha"]`, `iframe[src*="hcaptcha"]`, `iframe[src*="turnstile"]`, `.g-recaptcha`, `.h-captcha`, `[data-sitekey]`, `#cf-turnstile`, `.cf-turnstile`.
+Checked before any interaction. The page is skipped if any of these selectors match: `iframe[src*="recaptcha"]`, `iframe[src*="hcaptcha"]`, `iframe[src*="turnstile"]`, `.g-recaptcha`, `.h-captcha`, `[data-sitekey]`, `#cf-turnstile`, `.cf-turnstile`.
 
-### Tunable constants
+#### Tunable constants
 
 `NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (6) · `POST_NAVIGATE_DELAY` (4500 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
 
-### Known limitations
+#### Known limitations
 
-- Forms revealed by a click/modal may be missed.
+- Forms revealed by a click or modal may be missed.
 - Multi-step signup flows are not supported.
 - `filled: true` means submit was dispatched, not that the server accepted it.
 
 ---
 
-## `har` Collector
+### `har` Collector
 
 > **File:** `collectors/HarCollector.js` · **ID:** `har`
 
-Captures a full [HTTP Archive (HAR)](http://www.softwareishard.com/blog/har-12-spec/) of every network request made during a crawl, including response bodies, cookies, WebSocket frames, and cache events.
+Captures a full [HTTP Archive (HAR 1.2)](http://www.softwareishard.com/blog/har-12-spec/) of every network request made during a crawl, including response bodies, cookies, WebSocket frames, and cache events.
 
-### How it works
+#### How it works
 
 1. Subscribes to CDP `Network.*` and `Page.*` events as soon as a page target is attached.
-2. On each `Network.loadingFinished`, immediately fetches the response body from Chrome's buffer before it is evicted.
+2. On each `Network.loadingFinished`, immediately fetches the response body from Chrome's buffer before it can be evicted.
 3. After the crawl, passes all recorded events to `chrome-har` to assemble the HAR, then stitches the fetched response bodies into the matching entries.
 
-### Registration
+#### Registration
 
 ```js
 // crawlerConductor.js
@@ -179,27 +262,62 @@ module.exports = { …, HarCollector };
 har?: HARData | null;
 ```
 
-### Usage
+#### Usage
 
 ```sh
 npm run crawl -- -u "https://example.com" -d har -o ./data/captures -v
 ```
 
-### Output
+#### Output
 
 Standard HAR 1.2 object (`har.log.pages[]` + `har.log.entries[]`). Each entry includes full request/response headers (including actual `Cookie` / `Set-Cookie` via `ExtraInfo` events), response body as plain text or base64, precise timings, WebSocket frames, server IP, and connection ID. Returns `null` if no page target was attached.
 
-### CDP events captured
+The HAR is written to a separate `.har` file by the CLI (not embedded in the main JSON) to keep output sizes manageable.
+
+#### CDP events captured
 
 **Page:** `loadEventFired`, `domContentEventFired`, `frameStartedLoading`, `frameRequestedNavigation`, `frameAttached`, `frameNavigated`, `frameDetached`
 
 **Network:** `requestWillBeSent`, `requestServedFromCache`, `dataReceived`, `responseReceived`, `resourceChangedPriority`, `loadingFinished`, `loadingFailed`, `requestWillBeSentExtraInfo`, `responseReceivedExtraInfo`, `webSocketCreated`, `webSocketFrameSent`, `webSocketFrameReceived`, `webSocketClosed`
 
-### Buffer configuration
+#### Buffer configuration
 
 `Network.enable` is called with `maxTotalBufferSize: 100 MB` and `maxResourceBufferSize: 10 MB`. Adjust in `addSessionEvents()` if you need to capture larger responses or reduce memory usage.
 
-### Known limitations
+#### Known limitations
 
 - Response bodies for cached, redirected, or no-body responses are silently skipped (unavailable via CDP).
 - Very large responses may still be evicted from Chrome's buffer before `getResponseBody` is called on high-traffic pages.
+
+---
+
+## Output Format
+
+Each crawled URL produces a JSON file named after a hash of the URL. Schema is defined in `crawler.js` (`CollectResult`):
+
+| Field | Type | Description |
+|---|---|---|
+| `initialUrl` | `string` | URL as provided to the crawler |
+| `finalUrl` | `string` | URL after all redirects |
+| `timeout` | `boolean` | `true` if the page did not fully load before the timeout |
+| `testStarted` | `number` | Unix timestamp (ms) when the crawl began |
+| `testFinished` | `number` | Unix timestamp (ms) when the crawl ended |
+| `data` | `object` | Keyed by collector ID; each value is that collector's output |
+
+A `metadata.json` is also written per run, summarising configuration, timing, collector list, and success/failure counts.
+
+---
+
+## Creating a Collector
+
+Extend `BaseCollector` and implement the required methods:
+
+| Method | Required | Description |
+|---|---|---|
+| `id()` | ✅ | Unique string identifier |
+| `getData(options)` | ✅ | Return collected data. `options` provides `finalUrl` and `urlFilter` |
+| `init(options)` | — | Called before navigation begins |
+| `addTarget(session, targetInfo)` | — | Called for each new CDP target (page, iframe, worker…) |
+| `postLoad()` | — | Called after page load, before `extraExecutionTimeMs` wait |
+
+Register every new collector in `helpers/collectorsList.js`, `crawlerConductor.js`, and `main.js`. Optionally extend the `CollectorData` type in `collectorsList.js` for full type coverage.
