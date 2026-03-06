@@ -1,43 +1,43 @@
-# CDP & Puppeteer — Guía práctica para HAR capture
+# CDP & Puppeteer — Practical HAR Capture Guide
 
-> Guía de referencia rápida para crawlers Node.js con Puppeteer CDPSession + chrome-har.
-> Generado con Claude Sonnet 4.6 (`claude-sonnet-4-6`)
+> Quick reference for Node.js crawlers using Puppeteer CDPSession + chrome-har.
+> Generated with Claude Sonnet 4.6 (`claude-sonnet-4-6`)
 
 ---
 
-## Índice
+## Index
 
-1. [Ciclo de vida de una request](#1-ciclo-de-vida-de-una-request)
+1. [Request lifecycle](#1-request-lifecycle)
 2. [Network idle](#2-network-idle)
-3. [Targets y sesiones](#3-targets-y-sesiones)
-4. [Eventos de página](#4-eventos-de-página)
-5. [Captura del body](#5-captura-del-body)
-6. [Attachment y waitForDebuggerOnStart](#6-attachment-y-waitfordebuggeronstart)
-7. [Race conditions en multi-sesión](#7-race-conditions-en-multi-sesión)
-8. [Casos problemáticos en HAR capture](#8-casos-problemáticos-en-har-capture)
-9. [Patrones JS/JSDoc](#9-patrones-jsjsdoc)
+3. [Targets and sessions](#3-targets-and-sessions)
+4. [Page events](#4-page-events)
+5. [Body capture](#5-body-capture)
+6. [Attachment and waitForDebuggerOnStart](#6-attachment-and-waitfordebuggeronstart)
+7. [Race conditions in multi-session](#7-race-conditions-in-multi-session)
+8. [HAR capture failure modes](#8-har-capture-failure-modes)
+9. [JS/JSDoc patterns](#9-jsjsdoc-patterns)
 
 ---
 
-## 1. Ciclo de vida de una request
+## 1. Request lifecycle
 
-El orden de eventos para una request normal es:
+Event order for a normal request:
 
 ```
-requestWillBeSent          → el renderer decide hacer la request
-requestWillBeSentExtraInfo → el browser process añade cookies reales al wire
-responseReceived           → headers de respuesta recibidos
-responseReceivedExtraInfo  → headers reales del wire (incluyendo Set-Cookie HttpOnly)
-dataReceived               → chunks del body (0..N veces)
-loadingFinished            → body completo, ya puedes llamar getResponseBody
-  — o —
-loadingFailed              → error (net::ERR_*, cancelado, bloqueado)
+requestWillBeSent          → renderer decides to make the request
+requestWillBeSentExtraInfo → browser process adds real cookies to the wire
+responseReceived           → response headers received
+responseReceivedExtraInfo  → real wire headers (including HttpOnly Set-Cookie)
+dataReceived               → body chunks (0..N times)
+loadingFinished            → body complete, safe to call getResponseBody
+  — or —
+loadingFailed              → error (net::ERR_*, canceled, blocked)
 ```
 
-**¿Por qué dos streams paralelos?**
-Chrome separa renderer process y browser process. El renderer no tiene acceso a las cookies HttpOnly — solo el browser process las adjunta al wire. Por eso `requestWillBeSentExtraInfo` es el único sitio donde ves las cookies reales enviadas, y `responseReceivedExtraInfo` el único donde ves `Set-Cookie` con valores HttpOnly.
+**Why two parallel streams?**
+Chrome separates the renderer process and browser process. The renderer has no access to HttpOnly cookies — only the browser process attaches them to the wire. So `requestWillBeSentExtraInfo` is the only place you see the real sent cookies, and `responseReceivedExtraInfo` the only place you see `Set-Cookie` with HttpOnly values.
 
-> ⚠️ `requestWillBeSentExtraInfo` puede llegar **antes** que `requestWillBeSent`. Correla siempre por `requestId`, no por orden de llegada.
+> ⚠️ `requestWillBeSentExtraInfo` can arrive **before** `requestWillBeSent`. Always correlate by `requestId`, not by arrival order.
 
 **Docs:** [Network domain](https://chromedevtools.github.io/devtools-protocol/tot/Network/) · [requestWillBeSent](https://chromedevtools.github.io/devtools-protocol/tot/Network/#event-requestWillBeSent) · [responseReceived](https://chromedevtools.github.io/devtools-protocol/tot/Network/#event-responseReceived) · [loadingFinished](https://chromedevtools.github.io/devtools-protocol/tot/Network/#event-loadingFinished)
 
@@ -45,41 +45,41 @@ Chrome separa renderer process y browser process. El renderer no tiene acceso a 
 
 ## 2. Network idle
 
-Puppeteer no usa ningún concepto interno de Chrome — lo sintetiza contando eventos:
+Puppeteer doesn't use any Chrome-internal idle concept — it synthesizes it by counting events:
 
-| `waitUntil` | Condición | Debounce |
+| `waitUntil` | Condition | Debounce |
 |---|---|---|
-| `networkidle0` | 0 requests en vuelo | 500ms |
-| `networkidle2` | ≤2 requests en vuelo | 500ms |
+| `networkidle0` | 0 in-flight requests | 500ms |
+| `networkidle2` | ≤2 in-flight requests | 500ms |
 
-Cada `requestWillBeSent` suma 1, cada `loadingFinished`/`loadingFailed` resta 1.
+Every `requestWillBeSent` increments the counter, every `loadingFinished`/`loadingFailed` decrements it.
 
-**Casos donde falla:**
-- **Long-polling / SSE** — la conexión nunca cierra, el contador nunca llega a 0
-- **SPAs con setTimeout** — la red se queda idle, Puppeteer resuelve, y luego llega la segunda oleada de requests
-- **Service workers precaching** — sus requests van por su propia sesión, invisibles para la página
-- **WebSockets** — no cuentan en el contador, no bloquean idle
+**Where it breaks:**
+- **Long-polling / SSE** — connection never closes, counter never reaches 0
+- **SPAs with setTimeout** — network goes idle, Puppeteer resolves, then a second wave of requests fires
+- **Service worker precaching** — its requests go through its own session, invisible to the page
+- **WebSockets** — not counted in the in-flight counter, don't block idle
 
-**Recomendación práctica:** usa `networkidle2` + timeout duro, y no declares "done" hasta que `Page.loadEventFired` haya disparado.
+**Practical advice:** use `networkidle2` + a hard timeout, and don't declare done until `Page.loadEventFired` has fired.
 
 **Docs:** [waitForNavigation](https://pptr.dev/api/puppeteer.page.waitfornavigation) · [PuppeteerLifeCycleEvent](https://pptr.dev/api/puppeteer.puppeteerlifecycleevent)
 
 ---
 
-## 3. Targets y sesiones
+## 3. Targets and sessions
 
-Cada target (página, iframe cross-process, worker, service worker) tiene su propia sesión CDP independiente con su propio stack de red. Los eventos de red **no burbujean** al padre.
+Each target (page, cross-process iframe, worker, service worker) has its own independent CDP session with its own network stack. Network events **do not bubble** to the parent.
 
-**¿Cuándo Chrome crea un proceso nuevo para un iframe?**
-- Iframe cross-site → siempre proceso propio (Site Isolation, activado por defecto desde Chrome 67)
-- Iframe same-site → comparte proceso con el padre, sus eventos aparecen en la sesión del padre
-- Si Chrome llega al límite de procesos → puede colapsar targets en el mismo proceso (no determinista)
+**When does Chrome create a new process for an iframe?**
+- Cross-site iframe → always its own process (Site Isolation, on by default since Chrome 67)
+- Same-site iframe → shares the parent's process, its events appear in the parent's session
+- If Chrome hits the process cap → it may collapse targets into the same process (non-deterministic)
 
-**¿Por qué hay que llamar `Network.enable` en cada sesión?**
-Porque `Network.enable` activa la instrumentación solo en el `NetworkHandler` de esa sesión concreta. No hay un enable global.
+**Why call `Network.enable` on each session?**
+Because `Network.enable` activates instrumentation only in that session's `NetworkHandler`. There is no global enable.
 
 ```javascript
-// Hay que hacer esto en CADA sesión nueva
+// Must do this on EVERY new session
 await session.send('Network.enable', {
   maxTotalBufferSize: 20 * 1024 * 1024,
   maxResourceBufferSize: 5 * 1024 * 1024,
@@ -90,43 +90,43 @@ await session.send('Network.enable', {
 
 ---
 
-## 4. Eventos de página
+## 4. Page events
 
-| Evento | Cuándo dispara | Equivalente web |
+| Event | When it fires | Web equivalent |
 |---|---|---|
-| `Page.frameStartedLoading` | El frame empieza a cargar | — |
-| `Page.frameNavigated` | El frame hace commit de la navegación | — |
-| `Page.domContentEventFired` | Parser terminado + scripts defer ejecutados | `DOMContentLoaded` |
-| `Page.loadEventFired` | Todos los subresources cargados | `window.load` |
-| `Page.frameStoppedLoading` | Carga del frame completamente terminada | — |
-| `Page.navigatedWithinDocument` | Hash change o History API | No recarga |
+| `Page.frameStartedLoading` | Frame begins loading | — |
+| `Page.frameNavigated` | Frame commits the navigation | — |
+| `Page.domContentEventFired` | Parser done + defer scripts executed | `DOMContentLoaded` |
+| `Page.loadEventFired` | All subresources loaded | `window.load` |
+| `Page.frameStoppedLoading` | Frame load fully complete | — |
+| `Page.navigatedWithinDocument` | Hash change or History API | No reload |
 
-Para un crawler, `Page.loadEventFired` es el suelo mínimo antes de declarar la navegación completa.
+For a crawler, `Page.loadEventFired` is the minimum floor before declaring the navigation complete.
 
 **Docs:** [Page domain](https://chromedevtools.github.io/devtools-protocol/tot/Page/) · [loadEventFired](https://chromedevtools.github.io/devtools-protocol/tot/Page/#event-loadEventFired)
 
 ---
 
-## 5. Captura del body
+## 5. Body capture
 
-Tras `loadingFinished`, Chrome guarda el body en memoria en la sesión CDP. Puedes recuperarlo con `getResponseBody` hasta que lo expulse del buffer.
+After `loadingFinished`, Chrome keeps the body in memory in the CDP session. You can retrieve it with `getResponseBody` until it gets evicted from the buffer.
 
-**Límites del buffer (`Network.enable`):**
-- `maxTotalBufferSize` — máximo total para todos los bodies de esa sesión (default: 10 MB)
-- `maxResourceBufferSize` — máximo por response individual (default: 5 MB)
+**Buffer limits (`Network.enable`):**
+- `maxTotalBufferSize` — total max for all bodies in that session (default: 10 MB)
+- `maxResourceBufferSize` — max per individual response (default: 5 MB)
 
-**Cuándo falla `getResponseBody`:**
-- La request terminó antes de que llamaras `Network.enable`
-- El buffer se llenó y ese entry fue expulsado
-- Response sin body (204, 304, HEAD)
-- Response en streaming que nunca cierra (SSE)
-- Usaste la sesión equivocada ← **error muy común**
+**When `getResponseBody` fails:**
+- The request finished before you called `Network.enable`
+- The buffer filled up and that entry was evicted
+- Response has no body (204, 304, HEAD)
+- Streaming response that never closes (SSE)
+- You used the wrong session ← **very common mistake**
 
-**El body está ligado a la sesión que recibió `loadingFinished`.** Si el evento vino de la sesión del iframe, debes llamar `getResponseBody` en esa misma sesión, no en la de la página principal.
+**The body is tied to the session that received `loadingFinished`.** If the event came from an iframe's session, you must call `getResponseBody` on that same session, not on the main page session.
 
 ```javascript
 session.on('Network.loadingFinished', async (event) => {
-  // `session` está capturado en el closure — correcto
+  // `session` is captured in the closure — correct
   const body = await session.send('Network.getResponseBody', {
     requestId: event.requestId,
   });
@@ -137,51 +137,51 @@ session.on('Network.loadingFinished', async (event) => {
 
 ---
 
-## 6. Attachment y `waitForDebuggerOnStart`
+## 6. Attachment and `waitForDebuggerOnStart`
 
-Cuando usas `Target.setAutoAttach` con `waitForDebuggerOnStart: true`, Chrome pausa el target antes de ejecutar nada. La ventana para instrumentar es:
+When using `Target.setAutoAttach` with `waitForDebuggerOnStart: true`, Chrome pauses the target before executing anything. The instrumentation window is:
 
 ```
-attachedToTarget dispara
-  → llamas Network.enable (y lo que necesites)
-  → llamas Runtime.runIfWaitingForDebugger
-  → el target reanuda ejecución
-  → primera request → tú la capturas
+attachedToTarget fires
+  → you call Network.enable (and whatever else you need)
+  → you call Runtime.runIfWaitingForDebugger
+  → target resumes execution
+  → first request fires → you catch it
 ```
 
-Si llamas `Network.enable` **después** de `runIfWaitingForDebugger` en una página rápida, te pierdes la primera oleada de requests. El HAR saldrá incompleto.
+If you call `Network.enable` **after** `runIfWaitingForDebugger` on a fast page, you miss the first wave of requests. The HAR will be incomplete.
 
-**Propagación:** `setAutoAttach` solo aplica a los hijos directos de esa sesión. Para capturar iframes dentro de iframes, llama `setAutoAttach` también en cada sesión nueva que recibes.
+**Propagation:** `setAutoAttach` only applies to the direct children of that session. To capture iframes inside iframes, call `setAutoAttach` on each new session you receive too.
 
 **Docs:** [setAutoAttach](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-setAutoAttach) · [attachedToTarget](https://chromedevtools.github.io/devtools-protocol/tot/Target/#event-attachedToTarget) · [runIfWaitingForDebugger](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-runIfWaitingForDebugger)
 
 ---
 
-## 7. Race conditions en multi-sesión
+## 7. Race conditions in multi-session
 
-### El problema con `Promise.all`
+### The `Promise.all` problem
 
-Si usas `Promise.all` para habilitar dominios en varias sesiones en paralelo y una sesión muerta rechaza, **todas las demás se cancelan**. Resultado: HAR vacío.
+If you use `Promise.all` to enable domains across sessions in parallel and one dead session rejects, **all the others get canceled**. Result: empty HAR.
 
 ```javascript
-// ❌ Mal — una sesión muerta mata todas las demás
+// ❌ Bad — one dead session kills all the others
 await Promise.all(sessions.map(s => s.send('Network.enable', {})));
 
-// ✅ Bien — los fallos son esperados, continúa con las que funcionan
+// ✅ Good — failures are expected, continues with the ones that work
 await Promise.allSettled(sessions.map(s => s.send('Network.enable', {})));
 ```
 
-### ¿Por qué Chrome adjunta el mismo target dos veces?
+### Why does Chrome attach the same target twice?
 
-Pasa sobre todo con service workers ya registrados. Chrome crea dos sesiones para el mismo target. La primera queda obsoleta pero su WebSocket sigue abierto. Cualquier comando a esa sesión devolverá `"Session closed"` o `"Target already exists"`.
+Happens most often with already-registered service workers. Chrome creates two sessions for the same target. The first becomes stale but its WebSocket stays open. Any command to that session returns `"Session closed"` or `"Target already exists"`.
 
-**Cómo detectar una sesión muerta:** `session.connection()` devuelve `null` una vez procesado el evento de detach. Pero hay una ventana donde aún no se ha procesado — no lo uses como pre-check. En su lugar, wrap con try/catch.
+**Detecting a dead session:** `session.connection()` returns `null` once the detach event is processed. But there's a window where it hasn't been processed yet — don't use it as a pre-check. Use try/catch instead.
 
-### Patrón defensivo
+### Defensive pattern
 
 ```javascript
 async addTarget(session, targetInfo) {
-  // Habilita dominios — ignora fallos de sesiones muertas
+  // Enable domains — ignore failures from dead sessions
   await Promise.allSettled([
     session.send('Network.enable', {}),
     session.send('Target.setAutoAttach', {
@@ -198,11 +198,11 @@ async addTarget(session, targetInfo) {
       });
       this._bodies[event.requestId] = body;
     } catch {
-      // Normal: body expirado, sesión cerrada, response sin body
+      // Expected: evicted buffer, closed session, bodyless response
     }
   });
 
-  // Libera el target — catch por si no estaba pausado
+  // Release the target — catch in case it wasn't paused
   await session.send('Runtime.runIfWaitingForDebugger').catch(() => {});
 }
 ```
@@ -211,69 +211,69 @@ async addTarget(session, targetInfo) {
 
 ---
 
-## 8. Casos problemáticos en HAR capture
+## 8. HAR capture failure modes
 
-| Caso | Qué pasa | Cómo manejarlo |
+| Case | What happens | How to handle |
 |---|---|---|
-| **requestId duplicado** | Único por sesión, no entre sesiones | Prefija con sessionId: `"${sessionId}::${requestId}"` |
-| **Redirects** | El mismo `requestId` dispara varios `requestWillBeSent`, cada uno con `redirectResponse` | No sobreescribas en el Map — añade una entrada por evento |
-| **Caché de memoria** | Solo dispara `requestServedFromCache`, no `responseReceived` | `getResponseBody` fallará — HAR entry sin timing ni body |
-| **Caché de disco** | Secuencia completa pero `response.fromDiskCache === true` | Normal, funciona |
-| **Preflight CORS** | OPTIONS con su propio `requestId`, sin link al request real | Dos entries separadas en el HAR, sin relación explícita |
-| **SSE / chunked infinito** | `loadingFinished` nunca dispara | Detecta por content-type y maneja aparte o acepta que el body queda incompleto |
-| **Service worker** | Puede responder de cache sin hacer network | `responseReceived` con `fromServiceWorker: true`, sin eventos de red |
-| **QUIC / HTTP3** | `timing.connectStart` puede ser `-1` en 0-RTT | Clampea los timings a 0 para evitar negativos en el HAR |
-| **304 / 204 / HEAD** | Sin body | `getResponseBody` falla — pon `bodySize: 0` en el HAR entry |
+| **Duplicate requestId** | Unique per session, not across sessions | Prefix with sessionId: `"${sessionId}::${requestId}"` |
+| **Redirects** | Same `requestId` fires multiple `requestWillBeSent`, each with `redirectResponse` | Don't overwrite in the Map — add one entry per event |
+| **Memory cache** | Only fires `requestServedFromCache`, no `responseReceived` | `getResponseBody` will fail — HAR entry with no timing or body |
+| **Disk cache** | Full sequence but `response.fromDiskCache === true` | Normal, works fine |
+| **CORS preflight** | OPTIONS with its own `requestId`, no link to the actual request | Two separate HAR entries with no explicit relationship |
+| **SSE / infinite chunked** | `loadingFinished` never fires | Detect by content-type and handle separately, or accept incomplete body |
+| **Service worker** | May respond from cache without hitting the network | `responseReceived` with `fromServiceWorker: true`, no network events |
+| **QUIC / HTTP3** | `timing.connectStart` can be `-1` on 0-RTT | Clamp timings to 0 to avoid negative values in the HAR |
+| **304 / 204 / HEAD** | No body | `getResponseBody` fails — set `bodySize: 0` in the HAR entry |
 
 **Docs:** [chrome-har](https://github.com/sitespeedio/chrome-har) · [HAR 1.2 spec](http://www.softwareishard.com/blog/har-12-spec/) · [requestServedFromCache](https://chromedevtools.github.io/devtools-protocol/tot/Network/#event-requestServedFromCache)
 
 ---
 
-## 9. Patrones JS/JSDoc
+## 9. JS/JSDoc patterns
 
-### `async addTarget()` tiene que ser async de verdad
+### `async addTarget()` must actually be async
 
-El framework hace `await collector.addTarget(...)`. Si la función no es `async` o no devuelve la promesa, el framework continúa sin esperar y te pierdes todo.
+The framework does `await collector.addTarget(...)`. If the function isn't `async` or doesn't return the promise, the framework moves on without waiting and you miss everything.
 
 ```javascript
-// ❌ Devuelve undefined — el framework no espera nada
+// ❌ Returns undefined — framework doesn't wait
 addTarget(session, targetInfo) {
-  session.send('Network.enable', {}).then(() => { /* tarde */ });
+  session.send('Network.enable', {}).then(() => { /* too late */ });
 }
 
-// ✅ El framework espera a que todo esté listo
+// ✅ Framework waits until everything is ready
 async addTarget(session, targetInfo) {
   await session.send('Network.enable', {});
 }
 ```
 
-### Closure sobre `session` en un loop — por qué funciona
+### Closure over `session` in a loop — why it works
 
 ```javascript
 for (const session of sessions) {
   session.on('Network.loadingFinished', async (event) => {
     await session.send('Network.getResponseBody', { requestId: event.requestId });
-    //    ↑ captura la `session` de ESTA iteración, no una variable compartida
+    //    ↑ captures the `session` from THIS iteration, not a shared variable
   });
 }
 ```
 
-`for...of` con `const` crea un binding nuevo por iteración. Cada closure captura su propia `session`. No es el bug clásico de `var` donde todos los closures comparten la misma variable.
+`for...of` with `const` creates a new binding per iteration. Each closure captures its own `session`. This is not the classic `var` bug where all closures share the same variable.
 
-### `Set<Promise>` para tracking de trabajo en vuelo
+### `Set<Promise>` for tracking in-flight work
 
 ```javascript
 this._inFlight = new Set();
 
 const p = fetchBody(session, event);
 this._inFlight.add(p);
-p.finally(() => this._inFlight.delete(p)); // se limpia solo, no leakea
+p.finally(() => this._inFlight.delete(p)); // self-cleaning, no leak
 
-// En getData():
+// In getData():
 await Promise.allSettled([...this._inFlight]);
 ```
 
-### Imports de tipos JSDoc entre paquetes
+### JSDoc type imports across packages
 
 ```javascript
 /**
@@ -283,22 +283,22 @@ await Promise.allSettled([...this._inFlight]);
 async addTarget(session, targetInfo) { ... }
 ```
 
-No necesitas `tsconfig.json`. VS Code resuelve los tipos directamente desde los `.d.ts` de cada paquete.
+No `tsconfig.json` needed. VS Code resolves types directly from each package's `.d.ts`.
 
-### `@typedef` va antes de donde se usa
+### `@typedef` goes before where it's used
 
-JSDoc no hace hoisting. Si pones el `@typedef` después de la función que lo referencia, el type checker no lo encontrará.
+JSDoc doesn't hoist. If you put the `@typedef` after the function that references it, the type checker won't find it.
 
-### `?.()` para loggers opcionales
+### `?.()` for optional loggers
 
 ```javascript
-this._log?.('mensaje');  // no lanza TypeError si _log es undefined
+this._log?.('message');  // won't throw TypeError if _log is undefined
 ```
 
-Úsalo cuando el logger es genuinamente opcional. Si es obligatorio, llámalo directamente para que falle con un error claro.
+Use it when the logger is genuinely optional. If it's required, call it directly so it fails loudly.
 
 **Docs:** [Optional chaining](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Optional_chaining) · [JSDoc @typedef](https://jsdoc.app/tags-typedef) · [TypeScript JSDoc](https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html)
 
 ---
 
-*Generado con Claude Sonnet 4.6 (`claude-sonnet-4-6`) — Anthropic*
+*Generated with Claude Sonnet 4.6 (`claude-sonnet-4-6`) — Anthropic*
