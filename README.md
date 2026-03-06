@@ -28,11 +28,12 @@ npm run crawl -- -u "https://example.com" -o ./data/ -v
    - [Crawler — `crawler.js`](#crawler--crawlerjs)
    - [Collectors](#collectors)
    - [Reporters](#reporters)
-3. [Custom Collectors](#custom-collectors)
+3. [Creating a Collector](#creating-a-collector)
+4. [Custom Collectors](#custom-collectors)
    - [`emailFill` Collector](#emailfill-collector)
    - [`har` Collector](#har-collector)
-4. [Output Format](#output-format)
-5. [Creating a Collector](#creating-a-collector)
+5. [Output Format](#output-format)
+
 
 ---
 
@@ -154,6 +155,22 @@ Reporters handle all user-facing output. Each extends `BaseReporter` and receive
 | `cleanup({ startTime, endTime, successes, … })` | After the entire batch finishes |
 
 The default reporter is `cli` (progress display + console logging). Multiple reporters can be active simultaneously via `--reporters cli,file`.
+
+---
+
+## Creating a Collector
+
+Extend `BaseCollector` and implement the required methods:
+
+| Method | Required | Description |
+|---|---|---|
+| `id()` | ✅ | Unique string identifier |
+| `getData(options)` | ✅ | Return collected data. `options` provides `finalUrl` and `urlFilter` |
+| `init(options)` | — | Called before navigation begins |
+| `addTarget(session, targetInfo)` | — | Called for each new CDP target (page, iframe, worker…) |
+| `postLoad()` | — | Called after page load, before `extraExecutionTimeMs` wait |
+
+Register every new collector in `helpers/collectorsList.js`, `crawlerConductor.js`, and `main.js`. Optionally extend the `CollectorData` type in `collectorsList.js` for full type coverage.
 
 ---
 
@@ -310,17 +327,3 @@ Each crawled URL produces a JSON file named after a hash of the URL. Schema is d
 A `metadata.json` is also written per run, summarising configuration, timing, collector list, and success/failure counts.
 
 ---
-
-## Creating a Collector
-
-Extend `BaseCollector` and implement the required methods:
-
-| Method | Required | Description |
-|---|---|---|
-| `id()` | ✅ | Unique string identifier |
-| `getData(options)` | ✅ | Return collected data. `options` provides `finalUrl` and `urlFilter` |
-| `init(options)` | — | Called before navigation begins |
-| `addTarget(session, targetInfo)` | — | Called for each new CDP target (page, iframe, worker…) |
-| `postLoad()` | — | Called after page load, before `extraExecutionTimeMs` wait |
-
-Register every new collector in `helpers/collectorsList.js`, `crawlerConductor.js`, and `main.js`. Optionally extend the `CollectorData` type in `collectorsList.js` for full type coverage.
