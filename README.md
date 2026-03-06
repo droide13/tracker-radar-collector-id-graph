@@ -12,7 +12,10 @@ git clone <this-repo>
 npm i
 npm run crawl -- -u "https://example.com" -o ./data/ -v
 ```
-
+> 🚧 **Prototype Status**
+>
+> This repository contains a prototype implementation.  
+> It is not production-ready and is intended for experimentation and early feedback.
 ---
 
 ## Table of Contents
