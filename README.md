@@ -107,21 +107,10 @@ emailFill?: {
 ```
 
 ### Usage
-
+First modify email in helpers/emails.js to enter a e-mail address then exectue the command below (use -f to overwrite). Also can be run using option --config.
 ```sh
 # CLI — pass emailAddress via config file
-npm run crawl -- -u "https://example.com" -d emailFill --config ./config.json -v
-```
-```json
-{ "collectorFlags": { "emailAddress": "you@example.com" } }
-```
-```js
-// Programmatic
-const data = await crawler(new URL('https://example.com'), {
-    collectors: [new EmailFillCollector()],
-    collectorFlags: { emailAddress: 'you@example.com' },
-});
-// data.emailFill → { filled, captchaPresent, formUrl, visitedLinks, error }
+ npm run crawl -- -u "https://example.com" -d emailFill -v -o ./data/captures
 ```
 
 ### Output
@@ -193,13 +182,7 @@ har?: HARData | null;
 ### Usage
 
 ```sh
-npm run crawl -- -u "https://example.com" -d har -o ./data/ -v
-```
-```js
-const data = await crawler(new URL('https://example.com'), {
-    collectors: [new HarCollector()],
-});
-// data.har → standard HAR object  (har.log.entries, har.log.pages, …)
+npm run crawl -- -u "https://example.com" -d har -o ./data/captures -v
 ```
 
 ### Output
