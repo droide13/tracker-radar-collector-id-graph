@@ -3,7 +3,7 @@
     "logPath": "./data/log",
     "crawlers": 12,
     "maxLoadTimeMs": 5000,
-    "extraExecutionTimeMs": 1000,
+    "extraExecutionTimeMs": 5000,
     "verbose": true,
     "forceOverwrite": true,
     "filterOutFirstParty": false,
