@@ -35,6 +35,8 @@ program
     )
     .option('--chromium-version <version_number>', 'use custom version of chromium')
     .option('--selenium-hub <url>', 'selenium hub endpoint to request browsers from')
+    // NEW (ORI): Add one browser option to run everything from the main browser
+    .option("--one-browser")
     .parse(process.argv);
 
 /**
@@ -112,6 +114,7 @@ async function run({
     extraExecutionTimeMs,
     collectorFlags,
     seleniumHub,
+    oneBrowser,
 }) {
     const startTime = new Date();
 
@@ -187,7 +190,7 @@ async function run({
      */
     const failureCallback = (url) => {
         failures++;
-        updateProgress(url);
+        updateProgress(url, null);
     };
 
     try {
@@ -207,6 +210,7 @@ async function run({
             extraExecutionTimeMs,
             collectorFlags,
             seleniumHub,
+            oneBrowser,
         });
         log(chalk.green('\n✅ Finished successfully.'));
     } catch (e) {
@@ -309,6 +313,7 @@ if (!config.urls || !config.output) {
         extraExecutionTimeMs: config.extraExecutionTimeMs,
         collectorFlags,
         seleniumHub: config.seleniumHub,
+        oneBrowser: config.oneBrowser
     });
 }
 
@@ -340,4 +345,5 @@ if (!config.urls || !config.output) {
  * @property {number} extraExecutionTimeMs
  * @property {import('../collectors/BaseCollector').CollectorFlags} collectorFlags
  * @property {string} seleniumHub
+ * @property {boolean} oneBrowser
  */

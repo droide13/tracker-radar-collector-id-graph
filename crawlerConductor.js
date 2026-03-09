@@ -6,6 +6,7 @@ const crawl = require('./crawler');
 const { createTimer } = require('./helpers/timer');
 const { downloadChrome } = require('./helpers/chromiumDownload');
 const notABot = require('./helpers/notABot');
+const openBrowser = require('./browser/openBrowser');
 
 const MAX_NUMBER_OF_RETRIES = 2;
 
@@ -28,6 +29,7 @@ async function crawlAndSaveData({
     extraExecutionTimeMs,
     collectorFlags,
     seleniumHub,
+    oneBrowser,
 }) {
     const url = new URL(urlString);
     /**
@@ -43,6 +45,14 @@ async function crawlAndSaveData({
         log(chalk.gray(`${curTime} ${url.hostname}:`), ...msg);
     };
 
+    // If only one browser option is true create one browser and pass it as options
+    let browserConnection = null;
+    if(oneBrowser){
+        const browser = await openBrowser(log, proxyHost, executablePath, seleniumHub);
+        browserConnection = await browser.getConnection();
+        log(chalk.cyan(`Operating only in one browser\n`));
+    }
+
     const data = await crawl(url, {
         log: prefixedLog,
         // @ts-ignore
@@ -56,6 +66,7 @@ async function crawlAndSaveData({
         extraExecutionTimeMs,
         collectorFlags,
         seleniumHub,
+        browserConnection,
     });
 
     dataCallback(url, data);
@@ -114,6 +125,7 @@ module.exports = async (options) => {
             extraExecutionTimeMs: options.extraExecutionTimeMs,
             collectorFlags: JSON.parse(JSON.stringify(options.collectorFlags || {})), // clone so that we can modify it for each call
             seleniumHub: options.seleniumHub,
+            oneBrowser: options.oneBrowser,
         };
 
         const task = crawlAndSaveData.bind(null, crawlAndSaveDataOptions);
@@ -182,4 +194,5 @@ module.exports = async (options) => {
  * @property {number=} extraExecutionTimeMs
  * @property {import('./collectors/BaseCollector').CollectorFlags=} collectorFlags
  * @property {string=} seleniumHub
+ * @property {boolean=} oneBrowser
  */
