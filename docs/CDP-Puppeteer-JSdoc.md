@@ -657,4 +657,7 @@ if (!this._pageSession) {
 - Use `Promise.allSettled` when operating across multiple sessions — one dead session must not kill the rest.
 - `addTarget()` must be `async` and must `await` all setup — the crawler awaits it before releasing the target.
 - `@typedef` and inline `import()` give you full type safety without a TypeScript compiler.
+
+---
+
 *Generated with Claude Sonnet 4.6 (`claude-sonnet-4-6`) — Anthropic*
