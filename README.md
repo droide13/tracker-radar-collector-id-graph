@@ -33,6 +33,7 @@ npm run crawl --  --autoconsent-action optOut --config .\config.json
    - [Crawler Conductor — `crawlerConductor.js`](#crawler-conductor--crawlerconductorjs)
    - [Crawler — `crawler.js`](#crawler--crawlerjs)
    - [Collectors](#collectors)
+   - [Event Bus](#event-bus)
    - [Reporters](#reporters)
 3. [Creating a Collector](#creating-a-collector)
 4. [Custom Collectors](#custom-collectors)
@@ -108,7 +109,7 @@ Manages parallel execution across all input URLs. Responsibilities:
 
 - Spawns up to `floor(cores × 0.8)` concurrent crawlers by default, capped at the number of input URLs. Override with `-c`.
 - Downloads the correct Chromium binary **once**, before any parallel work begins.
-- Runs each URL through `crawlAndSaveData`, which wraps the core crawler call.
+- Runs each URL through `crawlAndSaveData`, which wraps the core crawl call.
 - On failure, automatically retries up to **2 times**. Async stack traces are disabled on retries as they can themselves cause crashes.
 - Supports per-URL collector overrides: different URLs in the same batch can run different collectors.
 
@@ -122,8 +123,9 @@ Core crawl logic, built directly on the Chrome DevTools Protocol via Puppeteer's
 2. **Collector init** — Calls `collector.init()` on every collector before navigation begins.
 3. **Navigation** — Sends `Page.navigate` and waits for `networkIdle` on the main frame. On timeout, calls `Page.stopLoading` and continues rather than failing hard.
 4. **Post-load** — Calls `collector.postLoad()`, then waits `extraExecutionTimeMs` (default 2500 ms) for the page to settle.
-5. **Data extraction** — Calls `collector.getData()` on each collector and assembles results into a keyed object.
-6. **Timeout enforcement** — A hard outer timeout of `maxLoadTimeMs × 2 + collectorExtraTime` prevents any single URL from hanging the queue.
+5. **Interact** — Calls `collector.interact()` on every collector. This is a blocking phase for page interactions (e.g. cookie popup acceptance) that must complete before data is collected. The HAR collector continues recording during this phase, capturing any network requests triggered by the interaction.
+6. **Data extraction** — Calls `collector.getData()` on each collector and assembles results into a keyed object.
+7. **Timeout enforcement** — A hard outer timeout of `maxLoadTimeMs × 2 + collectorExtraTime` prevents any single URL from hanging the queue.
 
 First-party filtering (`--only-3p`) is applied via `isThirdPartyRequest`, which compares eTLD+1 of the document against each request URL using `tldts`.
 
@@ -138,16 +140,41 @@ The lifecycle a collector sees per crawl:
 ```
 init(options)
     │  called once before navigation; use to set up state
+    │  receives: browserConnection, url, log, collectorFlags, bus, testStarted
     ▼
 addTarget(session, targetInfo)   [called N times — once per page, iframe, worker…]
     │  subscribe to CDP events here
     ▼
 postLoad()
-    │  called after networkIdle; trigger any post-load interactions
+    │  called after networkIdle; take pre-interaction snapshots
+    ▼
+interact()
+    │  called after extraExecutionTimeMs pause; perform page interactions
+    │  (e.g. accept cookie popup, fill forms)
+    │  HAR collector is still recording during this phase
     ▼
 getData({ finalUrl, urlFilter })
     │  return the collected data object
 ```
+
+---
+
+### Event Bus
+
+Each crawl gets a dedicated `EventEmitter` instance (the **bus**) created in `crawl()` and passed to every collector via `init(options)`. Collectors communicate through it without holding direct references to each other.
+
+The bus lifetime matches the crawl lifetime — one bus per URL, created alongside the `Crawler` instance and naturally garbage collected when the crawl ends.
+
+All event names are defined as constants in `helpers/collectorEvents.js`:
+
+| Event | Emitted by | Payload | Listened by |
+|---|---|---|---|
+| `SCREENSHOT_REQUESTED` | any collector | `label: string` | `ScreenshotCollector` |
+| `SCREENSHOT_TAKEN` | `ScreenshotCollector` | `Screenshot` | `CookiePopupsCollector` |
+| `SCREENSHOT_ERR` | `ScreenshotCollector` | — | `CookiePopupsCollector` |
+| `POPUP_ACCEPTED` | `CookiePopupsCollector` | `{ cmp, action, timestamp, relativeMs }` | any collector |
+
+`CookiePopupsCollector` uses `_requestScreenshotAndWait(label)` to emit `SCREENSHOT_REQUESTED` and then await either `SCREENSHOT_TAKEN` or `SCREENSHOT_ERR` before continuing, ensuring screenshots are not missed due to async timing.
 
 ---
 
@@ -176,6 +203,7 @@ Extend `BaseCollector` and implement the required methods:
 | `init(options)` | — | Called before navigation begins |
 | `addTarget(session, targetInfo)` | — | Called for each new CDP target (page, iframe, worker…) |
 | `postLoad()` | — | Called after page load, before `extraExecutionTimeMs` wait |
+| `interact()` | — | Called after `extraExecutionTimeMs` wait; use for page interactions |
 
 Register every new collector in `helpers/collectorsList.js`, `crawlerConductor.js`, and `main.js`. Optionally extend the `CollectorData` type in `collectorsList.js` for full type coverage.
 
@@ -415,13 +443,9 @@ A `metadata.json` is also written per run, summarising configuration, timing, co
 
 ---
 
-# Program time scheme
+## Program time scheme
 
-This is a program time scheme example showing the timings and function calls for screenshots and cookiepopups
-
-## Crawler Flow
-
-## Crawler Flow
+This is a program time scheme example showing the timings and function calls for screenshots and cookiepopups.
 
 ```text
 crawl(url, options)
@@ -435,7 +459,7 @@ crawl(url, options)
 │
 ├─ initCollectors()
 │   └─ collector.init()
-│      (each collector sets up state and bus listeners)
+│      receives: browserConnection, url, log, collectorFlags, bus, testStarted
 │
 ├─ navigateMainTarget()
 │   ├─ Page.navigate(url)
@@ -444,11 +468,14 @@ crawl(url, options)
 │      (page force-stopped if exceeded)
 │
 ├─ postLoadCollectors()  [sequential, no timeout]
-│   │
-│   ├─ screenshotCollector
-│   │   └─ take "post-load" screenshot
-│   │
-│   └─ cookiePopupsCollector
+│   └─ screenshotCollector
+│       └─ take "post-load" screenshot
+│
+├─ setTimeout(extraExecutionTimeMs)
+│   └─ fixed pause for the page to settle
+│
+├─ interactCollectors()  [sequential, blocking, no timeout]
+│   └─ cookiePopupsCollector.interact()
 │       │
 │       ├─ scrapePopups()
 │       │   └─ parallel scrape of all frames (max 20s)
@@ -457,29 +484,30 @@ crawl(url, options)
 │       │   └─ poll for cmpDetected + popupFound (max 10s)
 │       │
 │       ├─ _requestScreenshotAndWait("popup-found")
+│       │   └─ bus: SCREENSHOT_REQUESTED → SCREENSHOT_TAKEN / ERR
 │       │
 │       ├─ waitForAutoconsentFinish()
-│       │   ├─ waitForMessage optOutResult   (max 30s)
+│       │   ├─ waitForMessage optOutResult    (max 30s)
 │       │   ├─ waitForMessage autoconsentDone (max 1s)
 │       │   └─ waitForMessage selfTestResult  (max 1s)
 │       │
+│       ├─ popupActionedAt = Date.now()
+│       ├─ popupActionedAtRelativeMs = popupActionedAt - testStarted
+│       ├─ bus: emit POPUP_ACCEPTED { cmp, action, timestamp, relativeMs }
+│       │
 │       └─ _requestScreenshotAndWait("popup-actioned")
-│           └─ bus event:
-│              SCREENSHOT_REQUESTED → SCREENSHOT_TAKEN / ERR
+│           └─ bus: SCREENSHOT_REQUESTED → SCREENSHOT_TAKEN / ERR
 │
-├─ setTimeout(extraExecutionTimeMs)
-│   └─ fixed pause allowing post-popup network requests to settle
-│      HAR collector records all network activity in this window
+│   HAR collector records all network activity throughout interact phase
 │
 └─ getCollectorData()  [sequential, no timeout]
     │
     ├─ harCollector.getData()
-    │   └─ full request log (including post-popup requests)
+    │   └─ full request log including post-popup requests
     │
     ├─ screenshotCollector.getData()
     │   └─ take "final" screenshot → returns Screenshot[]
     │
     └─ cookiePopupsCollector.getData()
-        └─ returns:
-           { cmps, scrapedFrames, popupActionedAt }
+        └─ returns { cmps, scrapedFrames, popupActionedAt, popupActionedAtRelativeMs }
 ```

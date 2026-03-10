@@ -54,6 +54,7 @@ class BaseCollector {
  * @property {CollectorFlags} collectorFlags
  * Create event emiter for communication between collectors, keep it optional for backward compatibility
  * @property {import('events').EventEmitter} [bus]
+ * @property {number} testStarted - unix timestamp in ms when the crawl started
  */
 
 /**

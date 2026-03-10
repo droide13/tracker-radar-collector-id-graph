@@ -49,6 +49,7 @@ class CookiePopupsCollector extends ContentScriptCollector {
     init(options) {
         super.init(options);
         this.bus = options.bus;
+        this.testStarted = options.testStarted;
         this.shortTimeouts = options.collectorFlags.shortTimeouts;
         this.autoAction = options.collectorFlags.autoconsentAction;
         /** @type {ContentScriptMessage[]} */
@@ -66,6 +67,8 @@ class CookiePopupsCollector extends ContentScriptCollector {
         this.scrapeJobDeferred = createDeferred();
         /** @type {number | null} */
         this.popupActionedAt = null;
+        /** @type {number | null} */
+        this.popupActionedAtRelativeMs = null;
     }
 
     /**
@@ -439,25 +442,22 @@ class CookiePopupsCollector extends ContentScriptCollector {
     }
 
     /**
-     * Called after the crawl to retrieve the data. Can be async, can throw errors.
+     * Called after postLoad and extraExecutionTimeMs pause, before getData.
+     * Handles cookie popup interaction so HAR collector captures post-popup requests.
      *
-     * @returns {Promise<CookiePopupsCollectorResult>}
+     * @returns {Promise<void>}
      */
-    async getData() {
-        const timeboxedScrapeJob = wait(this.scrapePopups(), SCRAPE_TIMEOUT, 'Scraping popups timed out').then(
-            (scrapedFrames) => {
-                this.scrapeJobDeferred.resolve(scrapedFrames);
-                return scrapedFrames;
-            },
+    async interact() {
+        // kick off scraping in parallel with popup detection
+        wait(this.scrapePopups(), SCRAPE_TIMEOUT, 'Scraping popups timed out').then(
+            (frames) => this.scrapeJobDeferred.resolve(frames),
             (e) => {
                 if (e instanceof TimeoutError) {
                     this.log(e.message);
-                    const emptyResult = /** @type {ScrapeScriptResult[]} */ ([]);
-                    this.scrapeJobDeferred.resolve(emptyResult);
-                    return emptyResult;
+                    this.scrapeJobDeferred.resolve(/** @type {ScrapeScriptResult[]} */ ([]));
+                    return;
                 }
                 this.scrapeJobDeferred.reject(e);
-                throw e;
             },
         );
 
@@ -475,9 +475,37 @@ class CookiePopupsCollector extends ContentScriptCollector {
             this.log(`Waiting for autoconsent finish took ${autoconsentFinishTimer.getElapsedTime()}s`);
 
             this.popupActionedAt = Date.now();
-            this.bus.emit(POPUP_ACCEPTED, { cmp: popupFound.cmp, action: this.autoAction, timestamp: this.popupActionedAt });
+            this.popupActionedAtRelativeMs = this.popupActionedAt - this.testStarted;
+            this.bus.emit(POPUP_ACCEPTED, {
+                cmp: popupFound.cmp,
+                action: this.autoAction,
+                timestamp: this.popupActionedAt,
+                relativeMs: this.popupActionedAtRelativeMs,
+            });
             await this._requestScreenshotAndWait('popup-actioned');
+        } else {
+            // ensure scrapeJobDeferred is always resolved so getData doesn't hang
+            this.scrapeJobDeferred.promise.catch(() => {});
         }
+    }
+
+    /**
+     * Called after the crawl to retrieve the data. Can be async, can throw errors.
+     *
+     * @returns {Promise<CookiePopupsCollectorResult>}
+     */
+    async getData() {
+        const scrapedFrames = await wait(
+            this.scrapeJobDeferred.promise,
+            SCRAPE_TIMEOUT,
+            'Scraping popups timed out',
+        ).catch((e) => {
+            if (e instanceof TimeoutError) {
+                this.log(e.message);
+                return /** @type {ScrapeScriptResult[]} */ ([]);
+            }
+            throw e;
+        });
 
         const cmps = this.collectCMPResults();
 
@@ -496,11 +524,11 @@ class CookiePopupsCollector extends ContentScriptCollector {
             });
         }
 
-        const scrapedFrames = await timeboxedScrapeJob;
         return {
             cmps,
             scrapedFrames,
             popupActionedAt: this.popupActionedAt,
+            popupActionedAtRelativeMs: this.popupActionedAtRelativeMs,
         };
     }
 }
@@ -510,6 +538,7 @@ class CookiePopupsCollector extends ContentScriptCollector {
  * @property {AutoconsentResult[]} cmps
  * @property {ScrapeScriptResult[]} scrapedFrames
  * @property {number | null} popupActionedAt - unix timestamp in ms when the popup was actioned, null if no popup was found
+ * @property {number | null} popupActionedAtRelativeMs - ms elapsed since crawl start when popup was actioned, null if no popup was found
  */
 
 /**

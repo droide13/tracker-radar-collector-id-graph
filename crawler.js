@@ -242,15 +242,17 @@ class Crawler {
 
     /**
      * @param {URL} url
+     * @param {number} testStarted // Passed to let collectors calculate time elapsed
      */
-    async initCollectors(url) {
+    async initCollectors(url, testStarted) {
         /** @type {import('./collectors/BaseCollector').CollectorInitOptions} */
         const collectorOptions = {
             browserConnection: this.browserConnection,
             url,
             log: this.log,
             collectorFlags: this.options.collectorFlags,
-            bus: this.bus
+            bus: this.options.bus,
+            testStarted
         };
 
         for (const collector of this.collectors) {
@@ -272,6 +274,18 @@ class Crawler {
                 this.log(`${collector.id()} postLoad took ${postLoadTimer.getElapsedTime()}s`);
             } catch (e) {
                 this.log(chalk.yellow(`${collector.id()} postLoad failed`), chalk.gray(e.message), chalk.gray(e.stack));
+            }
+        }
+    }
+
+    async interactCollectors() {
+        for (const collector of this.collectors) {
+            const timer = createTimer();
+            try {
+                await collector.interact();
+                this.log(`${collector.id()} interact took ${timer.getElapsedTime()}s`);
+            } catch (e) {
+                this.log(chalk.yellow(`${collector.id()} interact failed`), chalk.gray(e.message), chalk.gray(e.stack));
             }
         }
     }
@@ -315,7 +329,7 @@ class Crawler {
         conn.on('Target.targetDestroyed', this.onTargetDestroyed.bind(this));
         conn.on('Target.targetCrashed', this.onTargetCrashed.bind(this));
 
-        await this.initCollectors(url);
+        await this.initCollectors(url, testStarted);  // pass testStarted
         this.log(`init collectors took ${getSiteDataTimer.getElapsedTime()}s`);
 
         await conn.send('Target.setAutoAttach', {
@@ -359,6 +373,12 @@ class Crawler {
         await new Promise((resolve) => {
             setTimeout(resolve, this.options.extraExecutionTimeMs);
         });
+
+        // NEW: blocking interaction phase before data collection
+        const interactCollectorsTimer = createTimer();
+        await this.interactCollectors();
+        this.log(`interact collectors took ${interactCollectorsTimer.getElapsedTime()}s`);
+
 
         const getCollectorDataTimer = createTimer();
         const data = await this.getCollectorData();
@@ -494,6 +514,7 @@ async function crawl(url, options) {
  * @property {number} maxLoadTimeMs,
  * @property {number} extraExecutionTimeMs,
  * @property {import('./collectors/BaseCollector').CollectorFlags} collectorFlags,
+ * @property {import('events').EventEmitter} bus
  */
 
 module.exports = crawl;
