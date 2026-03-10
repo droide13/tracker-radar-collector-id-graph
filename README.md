@@ -421,44 +421,65 @@ This is a program time scheme example showing the timings and function calls for
 
 ## Crawler Flow
 
-\`\`\`
+## Crawler Flow
+
+```text
 crawl(url, options)
 │
-├── openBrowser()
-├── new Crawler({ bus, collectors, maxLoadTimeMs, extraExecutionTimeMs })
+├─ openBrowser()
 │
-│   maxTotalTimeMs = maxLoadTimeMs * 2 + collectorExtraTimeMs
-│   (hard outer kill timeout wrapping everything below)
+├─ new Crawler({ bus, collectors, maxLoadTimeMs, extraExecutionTimeMs })
+│   │
+│   └─ maxTotalTimeMs = maxLoadTimeMs * 2 + collectorExtraTimeMs
+│      (hard outer kill timeout wrapping everything below)
 │
-├── initCollectors()
-│   └── collector.init()  ← each collector sets up state and bus listeners
+├─ initCollectors()
+│   └─ collector.init()
+│      (each collector sets up state and bus listeners)
 │
-├── navigateMainTarget()
-│   ├── Page.navigate(url)
-│   ├── waiting for networkIdle on main frame...
-│   └── timeout: maxLoadTimeMs (page force-stopped if exceeded)
+├─ navigateMainTarget()
+│   ├─ Page.navigate(url)
+│   ├─ wait for networkIdle on main frame
+│   └─ timeout: maxLoadTimeMs
+│      (page force-stopped if exceeded)
 │
-├── postLoadCollectors()            [no timeout, sequential]
-│   ├── screenshotCollector         → takes 'post-load' screenshot
-│   └── cookiePopupsCollector       → detects and actions cookie popup
-│       ├── scrapePopups()          → parallel scrape of all frames (max 20s)
-│       ├── waitForPopupFound()     → polls for cmpDetected + popupFound (max 10s)
-│       ├── _requestScreenshotAndWait('popup-found')
-│       ├── waitForAutoconsentFinish()
-│       │   ├── waitForMessage optOutResult   (max 30s)
-│       │   ├── waitForMessage autoconsentDone (max 1s)
-│       │   └── waitForMessage selfTestResult  (max 1s)
-│       └── _requestScreenshotAndWait('popup-actioned')
-│           └── bus: SCREENSHOT_REQUESTED → SCREENSHOT_TAKEN/ERR
+├─ postLoadCollectors()  [sequential, no timeout]
+│   │
+│   ├─ screenshotCollector
+│   │   └─ take "post-load" screenshot
+│   │
+│   └─ cookiePopupsCollector
+│       │
+│       ├─ scrapePopups()
+│       │   └─ parallel scrape of all frames (max 20s)
+│       │
+│       ├─ waitForPopupFound()
+│       │   └─ poll for cmpDetected + popupFound (max 10s)
+│       │
+│       ├─ _requestScreenshotAndWait("popup-found")
+│       │
+│       ├─ waitForAutoconsentFinish()
+│       │   ├─ waitForMessage optOutResult   (max 30s)
+│       │   ├─ waitForMessage autoconsentDone (max 1s)
+│       │   └─ waitForMessage selfTestResult  (max 1s)
+│       │
+│       └─ _requestScreenshotAndWait("popup-actioned")
+│           └─ bus event:
+│              SCREENSHOT_REQUESTED → SCREENSHOT_TAKEN / ERR
 │
-├── setTimeout(extraExecutionTimeMs)
-│   └── fixed pause for post-popup requests to settle
-│       HAR collector captures all network activity during this window
+├─ setTimeout(extraExecutionTimeMs)
+│   └─ fixed pause allowing post-popup network requests to settle
+│      HAR collector records all network activity in this window
 │
-└── getCollectorData()              [sequential, no timeout]
-    ├── harCollector.getData()      ← full request log including post-popup
-    ├── screenshotCollector.getData()
-    │   └── takes 'final' screenshot, returns Screenshot[]
-    └── cookiePopupsCollector.getData()
-        └── returns { cmps, scrapedFrames, popupActionedAt }
-\`\`\`
+└─ getCollectorData()  [sequential, no timeout]
+    │
+    ├─ harCollector.getData()
+    │   └─ full request log (including post-popup requests)
+    │
+    ├─ screenshotCollector.getData()
+    │   └─ take "final" screenshot → returns Screenshot[]
+    │
+    └─ cookiePopupsCollector.getData()
+        └─ returns:
+           { cmps, scrapedFrames, popupActionedAt }
+```
