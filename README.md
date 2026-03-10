@@ -39,6 +39,7 @@ npm run crawl --  --autoconsent-action optOut --config .\config.json
    - [`emailFill` Collector](#emailfill-collector)
    - [`har` Collector](#har-collector)
 5. [Output Format](#output-format)
+6. [Program time scheme](#program-time-scheme)
 
 
 ---
@@ -413,3 +414,56 @@ Each crawled URL produces a JSON file named after a hash of the URL. Schema is d
 A `metadata.json` is also written per run, summarising configuration, timing, collector list, and success/failure counts.
 
 ---
+
+# Program time scheme
+
+This is a program time scheme example showing the timings and function calls for screenshots and cookiepopups
+
+crawl()
+│
+├── openBrowser
+├── new Crawler()
+│
+├── maxTotalTimeMs = maxLoadTimeMs * 2 + collectorExtraTimeMs
+│                 = 5000 * 2 + (20000+30000+5000+5000)
+│                 = 70000ms  ← outer hard kill timeout
+│
+└── wait(crawler.getSiteData(), 70000ms)
+    │
+    ├── initCollectors()         ← bus, flags, event listeners set up
+    │
+    ├── navigateMainTarget()
+    │   ├── Page.navigate()
+    │   ├── waiting for networkIdle on main frame...
+    │   └── wait(..., 5000ms)    ← maxLoadTimeMs, times out and stops loading if exceeded
+    │
+    ├── postLoadCollectors()     ← sequential, no timeout
+    │   └── screenshot 'post-load' taken here
+    │
+    ├── setTimeout(10000ms)      ← extraExecutionTimeMs, fixed pause
+    │
+    └── getCollectorData()       ← sequential getData() calls on each collector
+        │
+        ├── screenshotCollector.getData()
+        │   └── takes 'final' screenshot
+        │
+        └── cookiePopupsCollector.getData()
+            │
+            ├── scrapePopups() started immediately (parallel, timebox 20000ms)
+            │
+            ├── waitForPopupFound()
+            │   ├── waitForMessage cmpDetected  (polls 200ms, up to 5000ms)
+            │   └── waitForMessage popupFound   (polls 200ms, up to 5000ms)
+            │
+            ├── [if popup found]
+            │   ├── await scrapeJobDeferred.promise  ← BLOCKS until scrape finishes
+            │   ├── await _requestScreenshotAndWait('popup-found')
+            │   │   └── waits for SCREENSHOT_TAKEN or SCREENSHOT_ERR on bus
+            │   ├── waitForAutoconsentFinish()
+            │   │   ├── waitForMessage optOutResult  (polls 1000ms, up to 30000ms)
+            │   │   ├── waitForMessage autoconsentDone (polls 100ms, up to 1000ms)
+            │   │   └── waitForMessage selfTestResult  (polls 100ms, up to 1000ms)
+            │   └── await _requestScreenshotAndWait('popup-actioned')
+            │       └── waits for SCREENSHOT_TAKEN or SCREENSHOT_ERR on bus
+            │
+            └── returns { cmps, scrapedFrames, popupActionedAt }
