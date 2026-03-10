@@ -12,6 +12,12 @@ git clone <this-repo>
 npm i
 npm run crawl -- -u "https://example.com" -o ./data/ -v
 ```
+
+```sh
+# Helpful command to run the default configuration declining the popups
+npm run crawl --  --autoconsent-action optOut --config .\config.json
+```
+
 > 🚧 **Prototype Status**
 >
 > This repository contains a prototype implementation.  
