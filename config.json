@@ -14,5 +14,4 @@
     "dataCollectors": ["cookies", "har", "screenshots", "emailFill"],
     "reporters": ["cli", "file", "html"],
     "urls": ["https://elpais.com", "https://www.redfin.com/", "https://www.24h.com.vn/", "https://www.ilfattoquotidiano.it/", "https://www.crazygames.com/", "https://lotterysambadresult.in/", "https://tenki.jp/", "https://m.olx.pl/", "https://www.carsensor.net/"],
-    "oneBrowser": true
 }
