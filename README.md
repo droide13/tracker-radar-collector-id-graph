@@ -419,51 +419,46 @@ A `metadata.json` is also written per run, summarising configuration, timing, co
 
 This is a program time scheme example showing the timings and function calls for screenshots and cookiepopups
 
-crawl()
+## Crawler Flow
+
+\`\`\`
+crawl(url, options)
 │
-├── openBrowser
-├── new Crawler()
+├── openBrowser()
+├── new Crawler({ bus, collectors, maxLoadTimeMs, extraExecutionTimeMs })
 │
-├── maxTotalTimeMs = maxLoadTimeMs * 2 + collectorExtraTimeMs
-│                 = 5000 * 2 + (20000+30000+5000+5000)
-│                 = 70000ms  ← outer hard kill timeout
+│   maxTotalTimeMs = maxLoadTimeMs * 2 + collectorExtraTimeMs
+│   (hard outer kill timeout wrapping everything below)
 │
-└── wait(crawler.getSiteData(), 70000ms)
-    │
-    ├── initCollectors()         ← bus, flags, event listeners set up
-    │
-    ├── navigateMainTarget()
-    │   ├── Page.navigate()
-    │   ├── waiting for networkIdle on main frame...
-    │   └── wait(..., 5000ms)    ← maxLoadTimeMs, times out and stops loading if exceeded
-    │
-    ├── postLoadCollectors()     ← sequential, no timeout
-    │   └── screenshot 'post-load' taken here
-    │
-    ├── setTimeout(10000ms)      ← extraExecutionTimeMs, fixed pause
-    │
-    └── getCollectorData()       ← sequential getData() calls on each collector
-        │
-        ├── screenshotCollector.getData()
-        │   └── takes 'final' screenshot
-        │
-        └── cookiePopupsCollector.getData()
-            │
-            ├── scrapePopups() started immediately (parallel, timebox 20000ms)
-            │
-            ├── waitForPopupFound()
-            │   ├── waitForMessage cmpDetected  (polls 200ms, up to 5000ms)
-            │   └── waitForMessage popupFound   (polls 200ms, up to 5000ms)
-            │
-            ├── [if popup found]
-            │   ├── await scrapeJobDeferred.promise  ← BLOCKS until scrape finishes
-            │   ├── await _requestScreenshotAndWait('popup-found')
-            │   │   └── waits for SCREENSHOT_TAKEN or SCREENSHOT_ERR on bus
-            │   ├── waitForAutoconsentFinish()
-            │   │   ├── waitForMessage optOutResult  (polls 1000ms, up to 30000ms)
-            │   │   ├── waitForMessage autoconsentDone (polls 100ms, up to 1000ms)
-            │   │   └── waitForMessage selfTestResult  (polls 100ms, up to 1000ms)
-            │   └── await _requestScreenshotAndWait('popup-actioned')
-            │       └── waits for SCREENSHOT_TAKEN or SCREENSHOT_ERR on bus
-            │
-            └── returns { cmps, scrapedFrames, popupActionedAt }
+├── initCollectors()
+│   └── collector.init()  ← each collector sets up state and bus listeners
+│
+├── navigateMainTarget()
+│   ├── Page.navigate(url)
+│   ├── waiting for networkIdle on main frame...
+│   └── timeout: maxLoadTimeMs (page force-stopped if exceeded)
+│
+├── postLoadCollectors()            [no timeout, sequential]
+│   ├── screenshotCollector         → takes 'post-load' screenshot
+│   └── cookiePopupsCollector       → detects and actions cookie popup
+│       ├── scrapePopups()          → parallel scrape of all frames (max 20s)
+│       ├── waitForPopupFound()     → polls for cmpDetected + popupFound (max 10s)
+│       ├── _requestScreenshotAndWait('popup-found')
+│       ├── waitForAutoconsentFinish()
+│       │   ├── waitForMessage optOutResult   (max 30s)
+│       │   ├── waitForMessage autoconsentDone (max 1s)
+│       │   └── waitForMessage selfTestResult  (max 1s)
+│       └── _requestScreenshotAndWait('popup-actioned')
+│           └── bus: SCREENSHOT_REQUESTED → SCREENSHOT_TAKEN/ERR
+│
+├── setTimeout(extraExecutionTimeMs)
+│   └── fixed pause for post-popup requests to settle
+│       HAR collector captures all network activity during this window
+│
+└── getCollectorData()              [sequential, no timeout]
+    ├── harCollector.getData()      ← full request log including post-popup
+    ├── screenshotCollector.getData()
+    │   └── takes 'final' screenshot, returns Screenshot[]
+    └── cookiePopupsCollector.getData()
+        └── returns { cmps, scrapedFrames, popupActionedAt }
+\`\`\`
