@@ -164,15 +164,19 @@ async function run({
 
         const outputFile = createOutputPath(outputPath, url);
 
-        // move screenshot to its own file and only keep screenshot path in the JSON data
         if (data.data.screenshots) {
-            const screenshotFilename = createOutputPath(outputPath, url, 'jpg');
-            fs.writeFileSync(screenshotFilename, Buffer.from(data.data.screenshots, 'base64'));
-
-            data.data.screenshots = screenshotFilename;
+            data.data.screenshots = data.data.screenshots.map((screenshot) => {
+                const screenshotFilename = createOutputPath(outputPath, url, `${screenshot.timestamp}-${screenshot.label}.jpg`);
+                fs.writeFileSync(screenshotFilename, Buffer.from(screenshot.data, 'base64'));
+                return {
+                    label: screenshot.label,
+                    timestamp: screenshot.timestamp,
+                    path: screenshotFilename,
+                };
+            });
         }
 
-        // NEW (ORI): move HAR to its own file and only keep the path in the JSON data
+        // Move HAR to its own file and only keep the path in the JSON data
         if (data.data.har) {
             const harFilename = createOutputPath(outputPath, url, 'har');
             fs.writeFileSync(harFilename, JSON.stringify(data.data.har, null, 2));

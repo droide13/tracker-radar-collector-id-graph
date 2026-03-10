@@ -5,6 +5,7 @@ const { wait, TimeoutError } = require('./helpers/wait');
 const tldts = require('tldts');
 const { DEFAULT_USER_AGENT, MOBILE_USER_AGENT, DEFAULT_VIEWPORT, MOBILE_VIEWPORT, VISUAL_DEBUG } = require('./constants');
 const openBrowser = require('./browser/openBrowser');
+const { EventEmitter } = require('events');
 
 const targetFilter = [
     // see list of types in https://source.chromium.org/chromium/chromium/src/+/main:content/browser/devtools/devtools_agent_host_impl.cc?ss=chromium&q=f:devtools%20-f:out%20%22::kTypeTab%5B%5D%22
@@ -53,6 +54,9 @@ class Crawler {
         this.log = options.log;
         this.browserConnection = options.browserConnection;
         this.collectors = options.collectors;
+        // Obtain collector bus to manage collector comunication
+        this.bus = options.bus
+
     }
 
     /**
@@ -246,6 +250,7 @@ class Crawler {
             url,
             log: this.log,
             collectorFlags: this.options.collectorFlags,
+            bus: this.bus
         };
 
         for (const collector of this.collectors) {
@@ -414,6 +419,9 @@ async function crawl(url, options) {
         emulateUserAgent = false;
     }
 
+    // Create event bus to comunicate collectors
+    const collectorBus = new EventEmitter();
+
     try {
         const crawler = new Crawler({
             browserConnection,
@@ -426,6 +434,7 @@ async function crawl(url, options) {
             maxLoadTimeMs,
             extraExecutionTimeMs,
             collectorFlags: options.collectorFlags,
+            bus: collectorBus,
         });
         data = await wait(crawler.getSiteData(url), maxTotalTimeMs, `${url} timed out`);
     } catch (e) {
@@ -470,6 +479,7 @@ async function crawl(url, options) {
  * @property {number=} extraExecutionTimeMs
  * @property {import('./collectors/BaseCollector').CollectorFlags=} collectorFlags
  * @property {string=} seleniumHub
+ * @property {EventEmitter=} bus
  */
 
 /**

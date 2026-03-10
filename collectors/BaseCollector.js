@@ -52,6 +52,8 @@ class BaseCollector {
  * @property {URL} url
  * @property {function(...any):void} log
  * @property {CollectorFlags} collectorFlags
+ * Create event emiter for communication between collectors, keep it optional for backward compatibility
+ * @property {import('events').EventEmitter} [bus]
  */
 
 /**
