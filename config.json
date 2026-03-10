@@ -13,5 +13,6 @@
     "chromiumVersion": "146.0.7680.66",
     "dataCollectors": ["cookies", "har", "screenshots", "cookiepopups"],
     "reporters": ["cli", "file"],
-    "urls": ["https://elpais.com", "https://www.redfin.com/", "https://www.24h.com.vn/", "https://www.ilfattoquotidiano.it/", "https://www.crazygames.com/", "https://lotterysambadresult.in/", "https://tenki.jp/", "https://m.olx.pl/", "https://www.carsensor.net/"]
+    "urls": ["https://elpais.com", "https://www.redfin.com/", "https://www.24h.com.vn/", "https://www.ilfattoquotidiano.it/", "https://www.crazygames.com/", "https://lotterysambadresult.in/", "https://tenki.jp/", "https://m.olx.pl/", "https://www.carsensor.net/"],
+    "autoconsentAction": "optIn"
 }

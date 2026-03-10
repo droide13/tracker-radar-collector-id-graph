@@ -14,7 +14,7 @@ function addProtocolIfNeeded(url) {
 /**
  * Looks at CLI flags, JSON config etc. to figure out the final crawl config
  *
- * @param {{config?: string, verbose?: boolean, forceOverwrite?: boolean, only3p?: boolean, mobile?: boolean, disableAntiBot?: boolean, output?: string, logPath?: string, crawlers?: string, proxyConfig?: string, regionCode?: string, chromiumVersion?: string, seleniumHub?: string, dataCollectors?: string, reporters?: string, url?: string, inputList?: string}} flags
+ * @param {{config?: string, verbose?: boolean, forceOverwrite?: boolean, only3p?: boolean, mobile?: boolean, disableAntiBot?: boolean, output?: string, logPath?: string, crawlers?: string, proxyConfig?: string, regionCode?: string, chromiumVersion?: string, seleniumHub?: string, dataCollectors?: string, reporters?: string, url?: string, inputList?: string, autoconsentAction?: string}} flags
  * @returns {CrawlConfig}
  */
 function figureOut(flags) {
@@ -67,6 +67,19 @@ function figureOut(flags) {
     }
     if (flags.seleniumHub) {
         crawlConfig.seleniumHub = flags.seleniumHub;
+    }
+
+    // autoconsentAction: CLI flag takes priority over config file value; default is 'ignore'
+    const VALID_AUTOCONSENT_ACTIONS = ['optIn', 'optOut', 'ignore'];
+    if (flags.autoconsentAction) {
+        if (!VALID_AUTOCONSENT_ACTIONS.includes(flags.autoconsentAction)) {
+            throw new Error(`Invalid autoconsentAction: "${flags.autoconsentAction}". Must be one of: ${VALID_AUTOCONSENT_ACTIONS.join(', ')}`);
+        }
+        crawlConfig.autoconsentAction = flags.autoconsentAction;
+    } else if (crawlConfig.autoconsentAction === undefined) {
+        crawlConfig.autoconsentAction = 'ignore';
+    } else if (!VALID_AUTOCONSENT_ACTIONS.includes(crawlConfig.autoconsentAction)) {
+        throw new Error(`Invalid autoconsentAction in config: "${crawlConfig.autoconsentAction}". Must be one of: ${VALID_AUTOCONSENT_ACTIONS.join(', ')}`);
     }
 
     // array settings
@@ -151,4 +164,5 @@ module.exports = {
  * @property {number} maxLoadTimeMs
  * @property {number} extraExecutionTimeMs
  * @property {string} seleniumHub
+ * @property {'optIn'|'optOut'|'ignore'} autoconsentAction
  */

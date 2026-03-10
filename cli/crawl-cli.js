@@ -31,29 +31,31 @@ program
     .option('--config <path>', 'crawl configuration file')
     .option(
         '--autoconsent-action <action>',
-        'dismiss cookie popups. Possible values: optOut, optIn. Works only when cookiepopups collector is enabled.',
+        'dismiss cookie popups. Possible values: optOut, optIn, ignore (default). Works only when cookiepopups collector is enabled.',
     )
     .option('--chromium-version <version_number>', 'use custom version of chromium')
     .option('--selenium-hub <url>', 'selenium hub endpoint to request browsers from')
-    // NEW (ORI): Add one browser option to run everything from the main browser
-    .option("--one-browser")
     .parse(process.argv);
 
 /**
  * @param {string} outputPath
  * @param {URL} url
  * @param {string} fileType file extension, defaults to 'json'
+ * @param {string} [autoconsentAction] optional suffix: 'optIn', 'optOut', or 'ignore'
  */
-function createOutputPath(outputPath, url, fileType = 'json') {
-    return path.join(outputPath, `${createUniqueUrlName(url)}.${fileType}`);
+function createOutputPath(outputPath, url, fileType = 'json', autoconsentAction = null) {
+    const baseName = createUniqueUrlName(url);
+    const suffix = autoconsentAction && autoconsentAction !== 'ignore' ? `_${autoconsentAction}` : '';
+    return path.join(outputPath, `${baseName}${suffix}.${fileType}`);
 }
 
 /**
  * @param {Array<string|{url:string, dataCollectors?:BaseCollector[]}>} inputUrls
  * @param {function} logFunction
  * @param {string} outputPath
+ * @param {string} autoconsentAction
  */
-function filterUrls(inputUrls, logFunction, outputPath) {
+function filterUrls(inputUrls, logFunction, outputPath, autoconsentAction) {
     return asyncLib
         .filter(inputUrls, (item, filterCallback) => {
             const urlString = typeof item === 'string' ? item : item.url;
@@ -73,7 +75,7 @@ function filterUrls(inputUrls, logFunction, outputPath) {
 
             if (outputPath) {
                 // filter out entries for which result file already exists
-                const outputFile = createOutputPath(outputPath, url);
+                const outputFile = createOutputPath(outputPath, url, 'json', autoconsentAction);
                 fs.access(outputFile, (err) => {
                     if (err) {
                         filterCallback(null, true);
@@ -114,6 +116,7 @@ async function run({
     extraExecutionTimeMs,
     collectorFlags,
     seleniumHub,
+    autoconsentAction,
 }) {
     const startTime = new Date();
 
@@ -130,7 +133,7 @@ async function run({
         });
     };
 
-    const urls = await filterUrls(inputUrls, log, forceOverwrite === true ? null : outputPath);
+    const urls = await filterUrls(inputUrls, log, forceOverwrite === true ? null : outputPath, autoconsentAction);
     log(chalk.yellow(`Skipped ${inputUrls.length - urls.length} URLs`));
 
     const urlsLength = urls.length;
@@ -162,11 +165,17 @@ async function run({
 
         crawlTimes.push([data.testStarted, data.testFinished, data.testFinished - data.testStarted]);
 
-        const outputFile = createOutputPath(outputPath, url);
+        const outputFile = createOutputPath(outputPath, url, 'json', autoconsentAction);
 
         if (data.data.screenshots) {
             data.data.screenshots = data.data.screenshots.map((screenshot) => {
-                const screenshotFilename = createOutputPath(outputPath, url, `${screenshot.timestamp}-${screenshot.label}.jpg`);
+                // Screenshot filename includes autoconsentAction suffix
+                const screenshotFilename = createOutputPath(
+                    outputPath,
+                    url,
+                    `${screenshot.timestamp}-${screenshot.label}_${autoconsentAction}.jpg`,
+                    null // suffix already embedded in fileType string above
+                );
                 fs.writeFileSync(screenshotFilename, Buffer.from(screenshot.data, 'base64'));
                 return {
                     label: screenshot.label,
@@ -177,8 +186,9 @@ async function run({
         }
 
         // Move HAR to its own file and only keep the path in the JSON data
+        // HAR filename includes autoconsentAction suffix
         if (data.data.har) {
-            const harFilename = createOutputPath(outputPath, url, 'har');
+            const harFilename = createOutputPath(outputPath, url, `har_${autoconsentAction}`, null);
             fs.writeFileSync(harFilename, JSON.stringify(data.data.har, null, 2));
             data.data.har = harFilename;
         }
@@ -238,12 +248,13 @@ async function run({
         failures,
         urls: inputUrls.length,
         skipped: inputUrls.length - urls.length,
+        autoconsentAction,
     });
 }
 
 const config = crawlConfig.figureOut(program.opts());
 const collectorFlags = {
-    autoconsentAction: program.opts().autoconsentAction,
+    autoconsentAction: config.autoconsentAction,
     enableAsyncStacktraces: true, // this flag is disabled during retries
     shortTimeouts: false,
 };
@@ -315,6 +326,7 @@ if (!config.urls || !config.output) {
         extraExecutionTimeMs: config.extraExecutionTimeMs,
         collectorFlags,
         seleniumHub: config.seleniumHub,
+        autoconsentAction: config.autoconsentAction,
     });
 }
 
@@ -346,4 +358,5 @@ if (!config.urls || !config.output) {
  * @property {number} extraExecutionTimeMs
  * @property {import('../collectors/BaseCollector').CollectorFlags} collectorFlags
  * @property {string} seleniumHub
+ * @property {'optIn'|'optOut'|'ignore'} autoconsentAction
  */
