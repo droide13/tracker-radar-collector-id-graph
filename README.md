@@ -353,7 +353,7 @@ Detected via: `iframe[src*="recaptcha"]`, `iframe[src*="hcaptcha"]`, `iframe[src
 
 #### Tunable constants
 
-`NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (6) · `POST_NAVIGATE_DELAY` (4500 ms) · `POST_SUBMIT_DELAY` (3000 ms) · `POST_POPUP_SETTLE_MS` (1500 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
+`NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (10) · `POST_NAVIGATE_DELAY` (4500 ms) · `POST_SUBMIT_DELAY` (3000 ms) · `POST_POPUP_SETTLE_MS` (1500 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
 
 All constants are in helpers/emailHelpers/constants.js.
 
@@ -506,4 +506,10 @@ crawl(url, options)
     │
     └─ cookiePopupsCollector.getData()
         └─ returns { cmps, scrapedFrames, popupActionedAt, popupActionedAtRelativeMs }
+```
+
+This process times out at
+
+```js
+const maxTotalTimeMs = maxLoadTimeMs * 2 + collectorExtraTimeMs;
 ```
