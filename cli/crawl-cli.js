@@ -45,7 +45,7 @@ program
  */
 function createOutputPath(outputPath, url, fileType = 'json', autoconsentAction = null) {
     const baseName = createUniqueUrlName(url);
-    const suffix = autoconsentAction && autoconsentAction !== 'ignore' ? `_${autoconsentAction}` : '';
+    const suffix = `_${autoconsentAction ?? 'ignore'}`;
     return path.join(outputPath, `${baseName}${suffix}.${fileType}`);
 }
 
@@ -173,8 +173,8 @@ async function run({
                 const screenshotFilename = createOutputPath(
                     outputPath,
                     url,
-                    `${screenshot.timestamp}-${screenshot.label}_${autoconsentAction}.jpg`,
-                    null // suffix already embedded in fileType string above
+                    `${screenshot.timestamp}-${screenshot.label}.jpg`,
+                    autoconsentAction
                 );
                 fs.writeFileSync(screenshotFilename, Buffer.from(screenshot.data, 'base64'));
                 return {
@@ -188,7 +188,7 @@ async function run({
         // Move HAR to its own file and only keep the path in the JSON data
         // HAR filename includes autoconsentAction suffix
         if (data.data.har) {
-            const harFilename = createOutputPath(outputPath, url, `har_${autoconsentAction}`, null);
+            const harFilename = createOutputPath(outputPath, url, 'har', autoconsentAction);
             fs.writeFileSync(harFilename, JSON.stringify(data.data.har, null, 2));
             data.data.har = harFilename;
         }
