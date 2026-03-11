@@ -106,6 +106,9 @@ const TYPING_DELAY_MAX_MS  = 180;
 /** Number of intermediate waypoints in a simulated mouse movement path. */
 const MOUSE_MOVE_STEPS     = 8;
 
+/** Milliseconds to wait after cookiePopupsCollector actions a popup before scanning for forms. */
+const POST_POPUP_SETTLE_MS = 1500;
+
 
 // ═══════════════════════════════════════════════════════════════════════════════════════
 // 5. JSDOC TYPEDEFS
@@ -175,5 +178,6 @@ module.exports = {
     POST_SUBMIT_DELAY,
     TYPING_DELAY_MIN_MS,
     TYPING_DELAY_MAX_MS,
-    MOUSE_MOVE_STEPS
+    MOUSE_MOVE_STEPS,
+    POST_POPUP_SETTLE_MS
 };

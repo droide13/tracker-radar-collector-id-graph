@@ -10,7 +10,7 @@
  * ═══════════════════════════════════════════════════════════════════════════════════════
  *
  * This class owns:
- *   • The BaseCollector lifecycle  (id / init / addTarget / postLoad / getData)
+ *   • The BaseCollector lifecycle  (id / init / addTarget / postLoad / interact / getData)
  *   • The CDPSession               (_mainSession, _evaluate)
  *   • Timing utilities             (_sleep, _jitter)
  *   • All chalk logging            (_log — single cyan colour, three weights)
@@ -27,18 +27,34 @@
  *   FormSubmitter    submitForm()             — submit button click or Enter fallback
  *
  * Helpers receive a plain deps object { session, evaluate, sleep, jitter }
- * rather than inheriting from a shared base class. cdpHelper.js is no longer used.
+ * rather than inheriting from a shared base class.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════
  * BASECOLLECTER LIFECYCLE
  * ═══════════════════════════════════════════════════════════════════════════════════════
  *
  *   id()         → returns the string key used in per-URL JSON output
- *   init()       → called once per URL; initialise state, load identity
- *   addTarget()  → called per CDP session; capture the main page session
- *   postLoad()   → called after navigation + network-idle + collectorExtraTimeMs;
+ *   init()       → called once per URL; initialise state, load identity, subscribe
+ *                  to POPUP_ACCEPTED on the event bus
+ *   addTarget()  → called per CDP session; capture the main page session + iframes
+ *   postLoad()   → called after navigation + network-idle; lightweight snapshot only,
+ *                  no form interaction
+ *   interact()   → called after extraExecutionTimeMs pause, AFTER all other interact()
+ *                  calls (including cookiePopupsCollector) have completed;
  *                  all form interaction runs here
  *   getData()    → returns the result object written to the per-URL JSON file
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ * CONSENT WALL HANDLING
+ * ═══════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Consent wall dismissal is now fully owned by cookiePopupsCollector, which runs its
+ * interact() phase before this collector. EmailFillCollector no longer injects CMP
+ * cookies/localStorage flags and no longer clicks any consent buttons.
+ *
+ * The POPUP_ACCEPTED bus event is recorded in _result.popupInfo for diagnostics.
+ * interact() waits an additional POST_POPUP_SETTLE_MS after a popup was actioned to
+ * let the page re-render before scanning for forms.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════
  * PARALLELISM CONSTRAINTS
@@ -61,41 +77,12 @@
  *     record so the HAR collector captures whatever response the server returns.
  *
  * ═══════════════════════════════════════════════════════════════════════════════════════
- * CONSENT WALL HANDLING  (work in progress)
+ * IFRAME FORM HANDLING
  * ═══════════════════════════════════════════════════════════════════════════════════════
  *
- * Goal: ignore consent walls entirely — never genuinely accept, just suppress them
- * so the newsletter form underneath becomes reachable.
- *
- * Two layers:
- *
- *   1. Pre-render injection (_preAcceptConsent) — fires in addTarget() before the
- *      first paint. Sets well-known CMP cookies (OneTrust, Didomi, Cookiebot, generic)
- *      and localStorage flags via Page.addScriptToEvaluateOnNewDocument. Prevents most
- *      walls from mounting at all.
- *
- *   2. Runtime click fallback (_dismissCookieBanner) — fires as Step 0 of every
- *      _attemptFill(). Handles walls backed by server-side consent verification that
- *      survived the injection. Only clicks buttons whose text unambiguously signals
- *      "accept all" (multilingual regex) — deliberately skips "Continue", "Next",
- *      and any button that could belong to a paywall or registration flow.
- *
- * Known limitation: sites that verify consent server-side and re-render the wall
- * after each navigation may still block access intermittently.
- *
- * ═══════════════════════════════════════════════════════════════════════════════════════
- * IFRAME FORM HANDLING  (work in progress)
- * ═══════════════════════════════════════════════════════════════════════════════════════
- *
- * Some newsletter forms are embedded in cross-origin iframes (e.g. plus.elpais.com
- * served inside elpais.com). Runtime.evaluate in the main frame cannot see their DOM,
- * so form detection returns nothing and the wrong button gets clicked.
- *
- * addTarget() collects every non-noise iframe CDPSession keyed by URL. If the main
- * frame yields no form, _attemptFill() probes each stored iframe session in turn.
- * Whichever session owns the form is used for all subsequent steps (field filling,
- * submit). CDP mouse events are still dispatched through Input.dispatchMouseEvent
- * which operates in viewport coordinates regardless of which session is active.
+ * Some newsletter forms are embedded in cross-origin iframes. addTarget() collects
+ * every non-noise iframe CDPSession keyed by URL. If the main frame yields no form,
+ * _attemptFill() probes each stored iframe session in turn.
  *
  * Known limitation: deeply nested iframes (iframe inside iframe) are not probed.
  *
@@ -113,9 +100,15 @@ const FormSubmitter   = require('../helpers/emailHelpers/formSubmitter');
 const loadIdentity    = require('../helpers/emailHelpers/loadIdentity');
 
 const {
+    POPUP_ACCEPTED
+} = require('../helpers/collectorEvents');
+
+const {
     MAX_CANDIDATE_LINKS,
     POST_NAVIGATE_DELAY,
-    POST_SUBMIT_DELAY
+    POST_SUBMIT_DELAY,
+    POST_POPUP_SETTLE_MS  // Settle time after popup dismissal, add to constants.js
+                          //     recommended value: 1500
 } = require('../helpers/emailHelpers/constants');
 
 // ── Chalk styles ─────────────────────────────────────────────────────────────────────
@@ -157,14 +150,15 @@ class EmailFillCollector extends BaseCollector {
     id() { return 'emailFill'; }
 
     /**
-     * @param {{ browserConnection: object, url: URL, log: Function }} options
+     * @param {{ browserConnection: object, url: URL, log: Function, bus: import('events').EventEmitter }} options
      */
     init(options) {
-        const { browserConnection, url, log } = options;
+        const { browserConnection, url, log, bus } = options;
 
         this._browserConnection = browserConnection;
         this._url               = url;
         this._rawLog            = log;
+        this._bus               = bus;
 
         const identity   = loadIdentity();
         this._email      = identity.email;
@@ -179,6 +173,27 @@ class EmailFillCollector extends BaseCollector {
          */
         this._iframeSessions = new Map();
 
+        /**
+         * Payload from the POPUP_ACCEPTED event, if cookiePopupsCollector fired one.
+         * Set by the bus listener registered below.
+         * @type {{ cmp: string, action: string, timestamp: number, relativeMs: number }|null}
+         */
+        this._popupAcceptedPayload = null;
+
+        // Listen for the popup-accepted signal emitted by cookiePopupsCollector.
+        // interact() is called sequentially — popup handling is already complete by the
+        // time our interact() runs, so this listener is mainly for diagnostics / logging.
+        // It is registered here (in init) so it is never missed regardless of timing.
+        if (bus) {
+            bus.on(POPUP_ACCEPTED, payload => {
+                this._popupAcceptedPayload = payload;
+                this._log(
+                    C.plain('POPUP_ACCEPTED received:'),
+                    C.dim(`cmp=${payload?.cmp}  action=${payload?.action}  +${payload?.relativeMs}ms`)
+                );
+            });
+        }
+
         this._result = {
             hasNewsletter      : false,
             submissionSucceeded: false,
@@ -189,6 +204,7 @@ class EmailFillCollector extends BaseCollector {
             forms              : [],
             filled             : false,
             captchaPresent     : false,
+            popupInfo          : null,  // populated from POPUP_ACCEPTED if received
             error              : null
         };
     }
@@ -197,9 +213,9 @@ class EmailFillCollector extends BaseCollector {
      * Capture the main page CDPSession and all non-noise iframe sessions.
      *
      * Main page:
-     *   - Enables the Input domain.
-     *   - Calls _preAcceptConsent() to inject CMP cookies and localStorage flags
-     *     before the page renders, preventing most consent walls from mounting.
+     *   - Enables the Input domain only.
+     *   - Consent wall handling is no longer injected here — it is owned by
+     *     cookiePopupsCollector which runs its interact() before ours.
      *
      * Iframes:
      *   - Stored in _iframeSessions for later probing if the main frame has no form.
@@ -212,7 +228,6 @@ class EmailFillCollector extends BaseCollector {
         if (targetInfo.type === 'page' && !this._mainSession) {
             this._mainSession = session;
             await session.send('Input.enable').catch(() => {});
-            await this._preAcceptConsent(session).catch(() => {});
             return;
         }
 
@@ -225,14 +240,49 @@ class EmailFillCollector extends BaseCollector {
     }
 
     /**
-     * Main entry point — runs after page load + network-idle + collectorExtraTimeMs.
+     * Called after networkIdle. No form interaction here — this phase is only for
+     * lightweight pre-interaction snapshots that other collectors may need.
+     *
+     * All form interaction has moved to interact() which runs after
+     * extraExecutionTimeMs and after cookiePopupsCollector.interact() completes.
      */
     async postLoad() {
+        // intentionally left lightweight — interaction happens in interact()
+        this._log(C.dim('postLoad — waiting for interact() phase'));
+    }
+
+    /**
+     * Main entry point — runs after extraExecutionTimeMs pause, sequentially after
+     * cookiePopupsCollector.interact() has already completed (and emitted POPUP_ACCEPTED
+     * if a popup was found and actioned).
+     *
+     * If a popup was actioned, we wait an additional POST_POPUP_SETTLE_MS to let the
+     * page finish re-rendering before scanning for forms.
+     */
+    async interact() {
         if (!this._mainSession) return;
 
         try {
-            this._log(C.bold('── starting ──'), `identity: ${C.plain(this._email)}  url: ${C.dim(this._url.href)}`);
+            this._log(
+                C.bold('── interact() starting ──'),
+                `identity: ${C.plain(this._email)}  url: ${C.dim(this._url.href)}`
+            );
 
+            // ── Post-popup settle ────────────────────────────────────────────────────
+            // cookiePopupsCollector.interact() is guaranteed to have finished before
+            // this method is called (sequential collector execution). If it actioned a
+            // popup, give the page a moment to re-render before we scan for forms.
+            if (this._popupAcceptedPayload) {
+                this._result.popupInfo = this._popupAcceptedPayload;
+                this._log(
+                    C.plain(`Popup was actioned (${this._popupAcceptedPayload.cmp}) — settling ${POST_POPUP_SETTLE_MS}ms before form scan…`)
+                );
+                await this._sleep(POST_POPUP_SETTLE_MS);
+            } else {
+                this._log(C.dim('No popup actioned — proceeding directly to form scan'));
+            }
+
+            // ── Form fill attempt ────────────────────────────────────────────────────
             let success = await this._attemptFill(this._mainSession);
 
             if (!success) {
@@ -268,7 +318,7 @@ class EmailFillCollector extends BaseCollector {
             }
 
         } catch (err) {
-            this._log(C.plain('Unhandled error in postLoad:'), C.dim(err.message));
+            this._log(C.plain('Unhandled error in interact():'), C.dim(err.message));
             this._result.error = err.message;
         }
     }
@@ -305,7 +355,9 @@ class EmailFillCollector extends BaseCollector {
      * there, probes each stored iframe session in turn — this handles newsletter
      * forms embedded in cross-origin iframes whose DOM is invisible to the main frame.
      *
-     *   Step 0 — Consent overlay  click-dismiss if still present after pre-injection
+     * Consent overlay handling has been removed from this method — it is fully
+     * owned by cookiePopupsCollector and completed before interact() is called.
+     *
      *   Step 1 — CAPTCHA check    detect type, record, continue regardless
      *   Step 2 — Form detection   main frame first, then iframe probe if needed
      *   Step 3 — Ancillary fields selects, checkboxes, name/phone/zip
@@ -317,18 +369,6 @@ class EmailFillCollector extends BaseCollector {
      * @returns {Promise<boolean>}
      */
     async _attemptFill(session) {
-
-        // ── Step 0: Consent overlay fallback ─────────────────────────────────────────
-        // Pre-injection in addTarget() suppresses most walls before render.
-        // This handles the remainder — server-side verified CMPs that still mounted.
-        // We click "accept all" purely to clear the overlay, not as genuine consent.
-        const dismissed = await this._dismissCookieBanner(session);
-        if (dismissed) {
-            this._log(C.plain('Consent overlay dismissed (click fallback) — settling 1500ms…'));
-            await this._sleep(1500);
-        } else {
-            this._log(C.dim('No consent overlay detected'));
-        }
 
         // ── Step 1: CAPTCHA ──────────────────────────────────────────────────────────
         const captchaType = await new CaptchaDetector(this._buildDeps(session)).detectCaptchaType();
@@ -420,109 +460,7 @@ class EmailFillCollector extends BaseCollector {
 
 
     // ═══════════════════════════════════════════════════════════════════════════════════
-    // 3. CONSENT WALL HELPERS
-    // ═══════════════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Inject CMP cookies and localStorage flags before the page renders.
-     * Fires on the main page session in addTarget(), before the first paint.
-     *
-     * This is not genuine consent — it is noise suppression. The injected values
-     * match what well-known CMPs (OneTrust, Didomi, Cookiebot, generic) look for
-     * to decide whether to show the consent wall.
-     *
-     * @param {object} session
-     */
-    async _preAcceptConsent(session) {
-        const domain = this._url?.hostname ?? '';
-
-        await session.send('Storage.setCookies', {
-            cookies: [
-                // OneTrust
-                { name: 'OptanonAlertBoxClosed', value: new Date().toISOString(), domain, path: '/' },
-                { name: 'OptanonConsent',        value: 'isGpcEnabled=0&datestamp=' + encodeURIComponent(new Date().toISOString()) + '&version=6.33.0&isIABGlobal=false&hosts=&consentId=fake&interactionCount=1&landingPath=NotLandingPage&groups=C0001%3A1%2CC0002%3A1%2CC0003%3A1%2CC0004%3A1&geolocation=%3B&AwaitingReconsent=false', domain, path: '/' },
-                // Didomi
-                { name: 'didomi_token',          value: 'eyJ1c2VyX2lkIjoiZmFrZSIsImNyZWF0ZWQiOiIyMDI0LTAxLTAxVDAwOjAwOjAwWiIsInVwZGF0ZWQiOiIyMDI0LTAxLTAxVDAwOjAwOjAwWiIsInZlbmRvcnMiOnsiZW5hYmxlZCI6W119LCJwdXJwb3NlcyI6eyJlbmFibGVkIjpbXX19', domain, path: '/' },
-                { name: 'euconsent-v2',          value: 'CPfake', domain, path: '/' },
-                // Cookiebot
-                { name: 'CookieConsent',         value: '{stamp:%27fake%27%2Cnecessary:true%2Cpreferences:true%2Cstatistics:true%2Cmarketing:true%2Cmethod:%27explicit%27%2Cver:1%2Cutc:1}', domain, path: '/' },
-                // Generic
-                { name: 'cookie_consent',        value: '1',    domain, path: '/' },
-                { name: 'gdpr_consent',          value: 'true', domain, path: '/' },
-                { name: 'consent_accepted',      value: '1',    domain, path: '/' },
-            ]
-        }).catch(() => {});
-
-        await session.send('Page.addScriptToEvaluateOnNewDocument', {
-            source: `
-                try {
-                    localStorage.setItem('OptanonAlertBoxClosed', new Date().toISOString());
-                    localStorage.setItem('didomi-consent-present', 'true');
-                    localStorage.setItem('didomi_token',           'fake_accepted');
-                    localStorage.setItem('cookie_consent',         '1');
-                    localStorage.setItem('gdpr',                   'accepted');
-                    localStorage.setItem('consent',                'true');
-                    localStorage.setItem('cookiesAccepted',        'true');
-                } catch (_) {}
-            `
-        }).catch(() => {});
-    }
-
-    /**
-     * Click-dismiss a consent overlay that survived pre-acceptance.
-     *
-     * Tries known CMP selectors first, then falls back to any visible button
-     * whose text exactly matches a multilingual "accept all" pattern.
-     *
-     * Deliberately conservative: "Continuar", "Continue", "Next", "Siguiente"
-     * and similar are NOT matched, so paywall and registration buttons are safe.
-     *
-     * @param {object} session
-     * @returns {Promise<boolean>}
-     */
-    async _dismissCookieBanner(session) {
-        return await this._evaluateIn(session, `
-            (function () {
-                const SELECTORS = [
-                    '#onetrust-accept-btn-handler',
-                    '#didomi-notice-agree-button',
-                    '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
-                    '.qc-cmp2-summary-buttons button:last-of-type',
-                    '#borlabs-cookie-btn-accept-all',
-                    '[aria-label*="Accept"]',
-                    '[aria-label*="Aceptar"]',
-                    '[aria-label*="Agree"]',
-                    '[aria-label*="Allow"]',
-                    'button'
-                ];
-
-                const ACCEPT_RE = /^(accept all|aceptar todo|agree|allow all|accepter tout|alle akzeptieren|accetta tutto|aceitar tudo)(\\s|$)/i;
-
-                for (const sel of SELECTORS) {
-                    let candidates;
-                    try { candidates = Array.from(document.querySelectorAll(sel)); }
-                    catch (_) { continue; }
-
-                    for (const el of candidates) {
-                        const text    = (el.textContent || el.value || el.getAttribute('aria-label') || '').trim();
-                        const r       = el.getBoundingClientRect();
-                        const visible = r.width > 0 && r.height > 0;
-
-                        if (sel === 'button' && !ACCEPT_RE.test(text)) continue;
-                        if (!visible) continue;
-
-                        el.click();
-                        return true;
-                    }
-                }
-                return false;
-            })();
-        `);
-    }
-
-
-    // ═══════════════════════════════════════════════════════════════════════════════════
-    // 4. CDP SESSION
+    // 3. CDP SESSION
     // ═══════════════════════════════════════════════════════════════════════════════════
 
     /**
@@ -570,7 +508,7 @@ class EmailFillCollector extends BaseCollector {
 
 
     // ═══════════════════════════════════════════════════════════════════════════════════
-    // 5. UTILITIES
+    // 4. UTILITIES
     // ═══════════════════════════════════════════════════════════════════════════════════
 
     _log(...parts) {
