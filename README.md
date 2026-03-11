@@ -1,4 +1,11 @@
 # Tracker Radar Collector — ID Graph Fork
+> 🚧 **Deprecated**
+>
+> Deprecated to build more robust architecture, parts of the project can be reused
+
+---
+
+
 
 A web crawling framework for large-scale, automated data collection from websites. This project is a modified fork of [DuckDuckGo's Tracker Radar Collector](https://github.com/duckduckgo/tracker-radar-collector), extended with custom collectors designed for identity graph and email tracking research.
 

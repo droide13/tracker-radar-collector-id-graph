@@ -55,8 +55,8 @@ function locateEmailForm(keywords, submitPatterns) {
 
         const emailField = Array.from(
             form.querySelectorAll(
-                'input[type="email"], input[name*="email" i], ' +
-                'input[placeholder*="email" i], input[id*="email" i]'
+                'input[type="email"], input[name*="email" i], input[id*="email" i], ' +
+                'input[placeholder*="email" i], input[name*="mail" i], input[id*="mail" i]'
             )
         ).find(el => {
             const r = el.getBoundingClientRect();
@@ -93,7 +93,8 @@ function locateEmailForm(keywords, submitPatterns) {
     // Fallback: standalone email inputs outside any <form>
     const standalone = Array.from(
         document.querySelectorAll(
-            'input[type="email"], input[name*="email" i], input[placeholder*="email" i]'
+            'input[type="email"], input[name*="email" i], input[id*="email" i], ' +
+            'input[placeholder*="email" i], input[name*="mail" i], input[id*="mail" i]'
         )
     ).find(el => {
         const r = el.getBoundingClientRect();
