@@ -100,7 +100,10 @@ const FormSubmitter   = require('../helpers/emailHelpers/formSubmitter');
 const loadIdentity    = require('../helpers/emailHelpers/loadIdentity');
 
 const {
-    POPUP_ACCEPTED
+    POPUP_ACCEPTED,
+    SCREENSHOT_REQUESTED,
+    SCREENSHOT_TAKEN,
+    SCREENSHOT_ERR
 } = require('../helpers/collectorEvents');
 
 const {
@@ -462,6 +465,19 @@ class EmailFillCollector extends BaseCollector {
         const submittedAt = Date.now();
         this._result.formSubmitedAt          = submittedAt;
         this._result.formSubmitedAtRelativeMs = submittedAt - this._testStarted;
+
+        // ── Screenshot ───────────────────────────────────────────────────────────────
+        await new Promise(resolve => {
+            const onDone = () => {
+                this._bus.off(SCREENSHOT_TAKEN, onDone);
+                this._bus.off(SCREENSHOT_ERR,   onDone);
+                resolve();
+            };
+            this._bus.once(SCREENSHOT_TAKEN, onDone);
+            this._bus.once(SCREENSHOT_ERR,   onDone);
+            this._bus.emit(SCREENSHOT_REQUESTED, 'form_submitted');
+        });
+        this._log(C.dim('Screenshot taken after form submission'));
 
         return true;
     }
