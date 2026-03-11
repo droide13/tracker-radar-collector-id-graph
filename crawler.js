@@ -242,9 +242,9 @@ class Crawler {
 
     /**
      * @param {URL} url
-     * @param {number} testStarted // Passed to let collectors calculate time elapsed
+     * @param {number} startTime // Passed to let collectors calculate time elapsed
      */
-    async initCollectors(url, testStarted) {
+    async initCollectors(url, startTime) {
         /** @type {import('./collectors/BaseCollector').CollectorInitOptions} */
         const collectorOptions = {
             browserConnection: this.browserConnection,
@@ -252,7 +252,7 @@ class Crawler {
             log: this.log,
             collectorFlags: this.options.collectorFlags,
             bus: this.options.bus,
-            testStarted
+            testStarted: startTime
         };
 
         for (const collector of this.collectors) {

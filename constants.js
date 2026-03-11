@@ -26,7 +26,7 @@ const MOBILE_VIEWPORT = {
 };
 
 // for debugging: will launch in window mode instead of headless, open devtools and don't close windows after process finishes
-const VISUAL_DEBUG = false;
+const VISUAL_DEBUG = true;
 
 const CHROMIUM_DOWNLOAD_DIR = path.join(__dirname, 'chromium');
 

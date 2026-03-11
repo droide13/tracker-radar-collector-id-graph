@@ -153,12 +153,13 @@ class EmailFillCollector extends BaseCollector {
      * @param {{ browserConnection: object, url: URL, log: Function, bus: import('events').EventEmitter }} options
      */
     init(options) {
-        const { browserConnection, url, log, bus } = options;
-
+        const { browserConnection, url, log, bus, testStarted } = options;
+    
         this._browserConnection = browserConnection;
         this._url               = url;
         this._rawLog            = log;
         this._bus               = bus;
+        this._testStarted = testStarted;
 
         const identity   = loadIdentity();
         this._email      = identity.email;
@@ -205,7 +206,9 @@ class EmailFillCollector extends BaseCollector {
             filled             : false,
             captchaPresent     : false,
             popupInfo          : null,  // populated from POPUP_ACCEPTED if received
-            error              : null
+            error              : null,
+            formSubmitedAt     : null,   // record timestamp of form submission
+            formSubmitedRelativeMs: null,   // record timestamp of form submission
         };
     }
 
@@ -454,6 +457,11 @@ class EmailFillCollector extends BaseCollector {
         this._log(C.dim(`Waiting ${POST_SUBMIT_DELAY}ms for page response…`));
         await this._sleep(POST_SUBMIT_DELAY);
         this._log(C.plain('Submission dispatched — response captured by HAR collector'));
+
+        // ── Record submission timestamps ─────────────────────────────────────────────
+        const submittedAt = Date.now();
+        this._result.formSubmitedAt          = submittedAt;
+        this._result.formSubmitedAtRelativeMs = submittedAt - this._testStarted;
 
         return true;
     }
