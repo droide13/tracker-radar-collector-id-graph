@@ -16,7 +16,11 @@ async function openBrowser(log, proxyHost, executablePath, seleniumHub) {
         // '--enable-blink-features=InterestCohortAPI',
         // '--enable-features=FederatedLearningOfCohorts:update_interval/10s/minimum_history_domain_size_required/1,FlocIdSortingLshBasedComputation,InterestCohortFeaturePolicy',
         // '--disable-auto-reload', // is it needed?
-        '--js-flags=--async-stack-traces --stack-trace-limit 32' // no quotes around the CLI flags needed
+        '--js-flags=--async-stack-traces --stack-trace-limit 32', // no quotes around the CLI flags needed
+        // Disable error messages
+        '--disable-features=MediaRouter', // Error messages supress
+        '--disable-background-networking',// Error messages supress, Disable background networking, dont think it is needed
+        '--log-level=3' // Error messages supress
     ];
     if (proxyHost) {
         let url;
