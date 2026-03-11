@@ -111,7 +111,7 @@ const {
     POST_NAVIGATE_DELAY,
     POST_SUBMIT_DELAY,
     POST_POPUP_SETTLE_MS,
-} = require('../helpers/emailHelpers/constants');
+} = require('../helpers/emailHelpers/emailConstants');
 
 // ── Chalk styles ──────────────────────────────────────────────────────────────
 const C = {
