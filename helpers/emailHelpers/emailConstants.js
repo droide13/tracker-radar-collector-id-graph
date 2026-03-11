@@ -89,7 +89,7 @@ const CAPTCHA_SELECTORS = [
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
 /** Maximum newsletter-related links to follow per page before giving up. */
-const MAX_CANDIDATE_LINKS  = 6;
+const MAX_CANDIDATE_LINKS  = 10;
 
 /** Milliseconds to wait after navigating to a candidate link (SPA hydration time). */
 const POST_NAVIGATE_DELAY  = 4500;

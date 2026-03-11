@@ -3,10 +3,11 @@
 /**
  * @file formSubmitter.js
  *
- * FormSubmitter - locates and activates the submit control for a detected form.
+ * FormSubmitter — locates and activates the submit control for a detected form.
  *
  * Receives { session, evaluate, sleep, jitter } from the collector.
  * Extends MouseKeyboard for CDP mouse primitives. No CdpHelper base class.
+ * All DOM logic lives in ./pageScripts/.
  *
  * Button resolution priority:
  *   1. The submitSelector pre-identified by FormDetector (id- or name-based)
@@ -16,7 +17,11 @@
  *   5. Enter key press
  */
 
-const MouseKeyboard = require('./mouseKeyboard');
+const MouseKeyboard              = require('./mouseKeyboard');
+const resolveSubmitButton        = require('./pageScripts/resolveSubmitButton');
+const triggerRecaptchaCallback   = require('./pageScripts/triggerRecaptchaCallback');
+const scrollSubmitButtonIntoView = require('./pageScripts/scrollSubmitButtonIntoView');
+const getFreshButtonRect         = require('./pageScripts/getFreshButtonRect');
 
 class FormSubmitter extends MouseKeyboard {
 
@@ -34,114 +39,27 @@ class FormSubmitter extends MouseKeyboard {
      * @param {number}      formIndex      - Index in document.forms[] (-1 = standalone)
      * @param {string|null} submitSelector - Pre-identified CSS selector, or null
      * @returns {Promise<{
-     *   dispatched: boolean,
-     *   method: 'click'|'enter'|null,
-     *   btnText: string|null,
-     *   btnRect: {x:number,y:number}|null,
+     *   dispatched:       boolean,
+     *   method:           'click'|'enter'|null,
+     *   btnText:          string|null,
+     *   btnRect:          { x: number, y: number }|null,
      *   captchaTriggered: boolean,
-     *   diagnosis: string
+     *   diagnosis:        string
      * }>}
      */
     async submitForm(formIndex, submitSelector) {
 
         // Step 1: inspect the form and locate the submit button
-        const info = await this._evaluate(`
-            (function () {
-                const result = {
-                    formExists   : false,
-                    formVisible  : false,
-                    totalForms   : document.forms.length,
-                    allButtons   : [],
-                    btn          : null,
-                    btnText      : null,
-                    btnRect      : null,
-                    btnOffscreen : false,
-                    resolvedBy   : null
-                };
+        const info = await this._evaluate(
+            `(${resolveSubmitButton.toString()})(${formIndex}, ${JSON.stringify(submitSelector)})`
+        );
 
-                if (${formIndex} >= 0 && ${JSON.stringify(submitSelector)}) {
-                    const form = document.forms[${formIndex}];
-                    if (form) {
-                        const el = form.querySelector(${JSON.stringify(submitSelector)});
-                        if (el) { result.btn = el; result.resolvedBy = 'pre-identified selector'; }
-                    }
-                }
+        // Step 2: try to trigger any reCAPTCHA callback bound to the submit button
+        const captchaTriggered = await this._evaluate(
+            `(${triggerRecaptchaCallback.toString()})()`
+        );
 
-                if (!result.btn && ${formIndex} >= 0) {
-                    const form = document.forms[${formIndex}];
-                    if (form) {
-                        result.formExists  = true;
-                        const fr = form.getBoundingClientRect();
-                        result.formVisible = fr.width > 0 && fr.height > 0;
-
-                        result.allButtons = Array.from(
-                            form.querySelectorAll('button, input[type="submit"], [role="button"]')
-                        ).map(b => ({
-                            tag    : b.tagName,
-                            type   : b.type || null,
-                            id     : b.id   || null,
-                            name   : b.name || null,
-                            text   : (b.textContent || b.value || '').trim().slice(0, 60),
-                            rect   : (r => ({ w: Math.round(r.width), h: Math.round(r.height),
-                                             x: Math.round(r.left),  y: Math.round(r.top) }))(b.getBoundingClientRect()),
-                            visible: (() => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()
-                        }));
-
-                        const el = form.querySelector(
-                            'button[type="submit"], input[type="submit"], button:last-of-type'
-                        );
-                        if (el) { result.btn = el; result.resolvedBy = 'form [type=submit] / last button'; }
-                    }
-                }
-
-                if (!result.btn) {
-                    const el = document.querySelector('button[type="submit"], input[type="submit"]');
-                    if (el) { result.btn = el; result.resolvedBy = 'global [type=submit] fallback'; }
-                }
-
-                if (!result.btn) {
-                    result.resolvedBy = null;
-                    return result;
-                }
-
-                result.btnText = (result.btn.textContent || result.btn.value || '').trim().slice(0, 60);
-                const r = result.btn.getBoundingClientRect();
-                result.btnRect     = { x: r.left + r.width / 2, y: r.top + r.height / 2,
-                                       w: Math.round(r.width), h: Math.round(r.height) };
-                result.btnOffscreen = r.width === 0 || r.height === 0;
-                result.btn = true;
-                return result;
-            })();
-        `);
-
-        // Step 2: try to trigger any reCAPTCHA callback bound to the submit button.
-        // Invisible v2/v3 widgets hijack the button's click handler and generate a
-        // token before allowing the POST. A raw mouse event bypasses this entirely.
-        const captchaTriggered = await this._evaluate(`
-            (function () {
-                const btn = document.querySelector('button[type="submit"], input[type="submit"]');
-                if (!btn) return false;
-
-                const widget = document.querySelector(
-                    '.g-recaptcha[data-bind="' + btn.id + '"], ' +
-                    '.g-recaptcha[data-bind="#' + btn.id + '"]'
-                );
-                if (!widget) return false;
-
-                const cb = widget.getAttribute('data-callback');
-                if (cb && typeof window[cb] === 'function') {
-                    try { window[cb]('recaptcha-bypass-attempt'); return true; } catch (_) {}
-                }
-
-                if (window.grecaptcha && widget.getAttribute('data-size') === 'invisible') {
-                    try { window.grecaptcha.execute(); return true; } catch (_) {}
-                }
-
-                return false;
-            })();
-        `);
-
-        // Step 3: build diagnosis string (after both evaluates so all vars are defined)
+        // Step 3: build diagnosis string
         const lines = [];
         lines.push(`formIndex:${formIndex}  totalForms:${info?.totalForms ?? '?'}  submitSelector:${submitSelector ?? 'none'}`);
         lines.push(`formExists:${info?.formExists}  formVisible:${info?.formVisible}`);
@@ -171,37 +89,44 @@ class FormSubmitter extends MouseKeyboard {
         // Step 4: dispatch
         if (info?.btnRect && !info.btnOffscreen) {
 
-            // Scroll the button into the centre of the viewport before clicking.
-            // btnRect coords are page-relative (getBoundingClientRect + scrollY),
-            // but CDP mouse events are viewport-relative — we must align them first.
-            await this._evaluate(`
-                (function () {
-                    const sel = ${JSON.stringify(submitSelector)} || 'button[type="submit"], input[type="submit"]';
-                    const btn = document.querySelector(sel);
-                    if (btn) btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-                })();
-            `);
+            // Scroll the button into the centre of the viewport so CDP viewport-relative
+            // coordinates are valid, then re-read the rect after settling.
+            await this._evaluate(
+                `(${scrollSubmitButtonIntoView.toString()})(${JSON.stringify(submitSelector)})`
+            );
             await this._sleep(300);
 
-            // Re-read the rect AFTER scrolling — coords have changed in viewport space.
-            const freshRect = await this._evaluate(`
-                (function () {
-                    const sel = ${JSON.stringify(submitSelector)} || 'button[type="submit"], input[type="submit"]';
-                    const btn = document.querySelector(sel);
-                    if (!btn) return null;
-                    const r = btn.getBoundingClientRect();
-                    return { x: r.left + r.width / 2, y: r.top + r.height / 2,
-                            w: Math.round(r.width),   h: Math.round(r.height) };
-                })();
-            `);
+            const freshRect = await this._evaluate(
+                `(${getFreshButtonRect.toString()})(${JSON.stringify(submitSelector)})`
+            );
 
             const target = freshRect || info.btnRect;
             await this._cdpMouseMove(target.x, target.y);
             await this._sleep(this._jitter(100, 250));
             await this._cdpClick(target.x, target.y);
-            return { dispatched: true, method: 'click', btnText: info.btnText,
-                    btnRect: target, captchaTriggered, diagnosis };
+
+            return {
+                dispatched      : true,
+                method          : 'click',
+                btnText         : info.btnText,
+                btnRect         : target,
+                captchaTriggered,
+                diagnosis,
+            };
         }
+
+        // Step 5: Enter key fallback
+        await this._session.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Return' });
+        await this._session.send('Input.dispatchKeyEvent', { type: 'keyUp',   key: 'Return' });
+
+        return {
+            dispatched      : true,
+            method          : 'enter',
+            btnText         : null,
+            btnRect         : null,
+            captchaTriggered,
+            diagnosis,
+        };
     }
 }
 
