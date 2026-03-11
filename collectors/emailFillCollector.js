@@ -48,7 +48,7 @@
  * CONSENT WALL HANDLING
  * ═══════════════════════════════════════════════════════════════════════════════════════
  *
- * Consent wall dismissal is now fully owned by cookiePopupsCollector, which runs its
+ * Consent wall dismissal is fully owned by cookiePopupsCollector, which runs its
  * interact() phase before this collector. EmailFillCollector no longer injects CMP
  * cookies/localStorage flags and no longer clicks any consent buttons.
  *
@@ -103,23 +103,21 @@ const {
     POPUP_ACCEPTED,
     SCREENSHOT_REQUESTED,
     SCREENSHOT_TAKEN,
-    SCREENSHOT_ERR
+    SCREENSHOT_ERR,
 } = require('../helpers/collectorEvents');
 
 const {
     MAX_CANDIDATE_LINKS,
     POST_NAVIGATE_DELAY,
     POST_SUBMIT_DELAY,
-    POST_POPUP_SETTLE_MS  // Settle time after popup dismissal, add to constants.js
-                          //     recommended value: 1500
+    POST_POPUP_SETTLE_MS,
 } = require('../helpers/emailHelpers/constants');
 
-// ── Chalk styles ─────────────────────────────────────────────────────────────────────
-// Single colour: cyan. Three weights only.
+// ── Chalk styles ──────────────────────────────────────────────────────────────
 const C = {
     bold  : chalk.cyan.bold,
     plain : chalk.cyan,
-    dim   : chalk.cyan.dim
+    dim   : chalk.cyan.dim,
 };
 
 // Third-party iframe origins that will never contain a newsletter form.
@@ -153,19 +151,19 @@ class EmailFillCollector extends BaseCollector {
     id() { return 'emailFill'; }
 
     /**
-     * @param {{ browserConnection: object, url: URL, log: Function, bus: import('events').EventEmitter }} options
+     * @param {{ browserConnection: object, url: URL, log: Function, bus: import('events').EventEmitter, testStarted: number }} options
      */
     init(options) {
         const { browserConnection, url, log, bus, testStarted } = options;
-    
+
         this._browserConnection = browserConnection;
         this._url               = url;
         this._rawLog            = log;
         this._bus               = bus;
-        this._testStarted = testStarted;
+        this._testStarted       = testStarted;
 
-        const identity   = loadIdentity();
-        this._email      = identity.email;
+        const identity = loadIdentity();
+        this._email    = identity.email;
 
         /** @type {object|null} */
         this._mainSession = null;
@@ -179,15 +177,10 @@ class EmailFillCollector extends BaseCollector {
 
         /**
          * Payload from the POPUP_ACCEPTED event, if cookiePopupsCollector fired one.
-         * Set by the bus listener registered below.
          * @type {{ cmp: string, action: string, timestamp: number, relativeMs: number }|null}
          */
         this._popupAcceptedPayload = null;
 
-        // Listen for the popup-accepted signal emitted by cookiePopupsCollector.
-        // interact() is called sequentially — popup handling is already complete by the
-        // time our interact() runs, so this listener is mainly for diagnostics / logging.
-        // It is registered here (in init) so it is never missed regardless of timing.
         if (bus) {
             bus.on(POPUP_ACCEPTED, payload => {
                 this._popupAcceptedPayload = payload;
@@ -199,33 +192,24 @@ class EmailFillCollector extends BaseCollector {
         }
 
         this._result = {
-            hasNewsletter      : false,
-            submissionSucceeded: false,
-            captchaBlocked     : false,
-            doubleOptIn        : false,
-            visitedLinks       : [],
-            formUrl            : null,
-            forms              : [],
-            filled             : false,
-            captchaPresent     : false,
-            popupInfo          : null,  // populated from POPUP_ACCEPTED if received
-            error              : null,
-            formSubmitedAt     : null,   // record timestamp of form submission
-            formSubmitedRelativeMs: null,   // record timestamp of form submission
+            hasNewsletter            : false,
+            submissionSucceeded      : false,
+            captchaBlocked           : false,
+            doubleOptIn              : false,
+            visitedLinks             : [],
+            formUrl                  : null,
+            forms                    : [],
+            filled                   : false,
+            captchaPresent           : false,
+            popupInfo                : null,
+            popupActionedAt          : null,
+            popupActionedAtRelativeMs: null,
+            error                    : null,
         };
     }
 
     /**
      * Capture the main page CDPSession and all non-noise iframe sessions.
-     *
-     * Main page:
-     *   - Enables the Input domain only.
-     *   - Consent wall handling is no longer injected here — it is owned by
-     *     cookiePopupsCollector which runs its interact() before ours.
-     *
-     * Iframes:
-     *   - Stored in _iframeSessions for later probing if the main frame has no form.
-     *   - Known third-party noise (reCAPTCHA, analytics, ads) is filtered out.
      *
      * @param {object} session
      * @param {{ type: string, url?: string }} targetInfo
@@ -246,24 +230,15 @@ class EmailFillCollector extends BaseCollector {
     }
 
     /**
-     * Called after networkIdle. No form interaction here — this phase is only for
-     * lightweight pre-interaction snapshots that other collectors may need.
-     *
-     * All form interaction has moved to interact() which runs after
-     * extraExecutionTimeMs and after cookiePopupsCollector.interact() completes.
+     * Called after networkIdle. Lightweight — all interaction happens in interact().
      */
     async postLoad() {
-        // intentionally left lightweight — interaction happens in interact()
         this._log(C.dim('postLoad — waiting for interact() phase'));
     }
 
     /**
      * Main entry point — runs after extraExecutionTimeMs pause, sequentially after
-     * cookiePopupsCollector.interact() has already completed (and emitted POPUP_ACCEPTED
-     * if a popup was found and actioned).
-     *
-     * If a popup was actioned, we wait an additional POST_POPUP_SETTLE_MS to let the
-     * page finish re-rendering before scanning for forms.
+     * cookiePopupsCollector.interact() has already completed.
      */
     async interact() {
         if (!this._mainSession) return;
@@ -275,9 +250,6 @@ class EmailFillCollector extends BaseCollector {
             );
 
             // ── Post-popup settle ────────────────────────────────────────────────────
-            // cookiePopupsCollector.interact() is guaranteed to have finished before
-            // this method is called (sequential collector execution). If it actioned a
-            // popup, give the page a moment to re-render before we scan for forms.
             if (this._popupAcceptedPayload) {
                 this._result.popupInfo = this._popupAcceptedPayload;
                 this._log(
@@ -339,9 +311,6 @@ class EmailFillCollector extends BaseCollector {
     // ═══════════════════════════════════════════════════════════════════════════════════
 
     /**
-     * Build a deps bundle scoped to a specific CDPSession.
-     * All evaluate calls in helpers will run in that session's frame context.
-     *
      * @param {object} session
      * @returns {{ session, evaluate, sleep, jitter }}
      */
@@ -358,11 +327,7 @@ class EmailFillCollector extends BaseCollector {
      * Orchestrate one form-fill attempt.
      *
      * Starts with the provided session (usually main frame). If no form is found
-     * there, probes each stored iframe session in turn — this handles newsletter
-     * forms embedded in cross-origin iframes whose DOM is invisible to the main frame.
-     *
-     * Consent overlay handling has been removed from this method — it is fully
-     * owned by cookiePopupsCollector and completed before interact() is called.
+     * there, probes each stored iframe session in turn.
      *
      *   Step 1 — CAPTCHA check    detect type, record, continue regardless
      *   Step 2 — Form detection   main frame first, then iframe probe if needed
@@ -370,6 +335,7 @@ class EmailFillCollector extends BaseCollector {
      *   Step 4 — Email field      human-like typing via CDP events
      *   Step 5 — Submit           scroll into view, click or Enter fallback
      *   Step 6 — Wait             POST_SUBMIT_DELAY ms for page response
+     *   Step 7 — Screenshot       emits SCREENSHOT_REQUESTED, waits for result
      *
      * @param {object} session - Starting CDPSession
      * @returns {Promise<boolean>}
@@ -413,7 +379,6 @@ class EmailFillCollector extends BaseCollector {
             C.dim(`formIndex:${formInfo.formIndex}  fieldIndex:${formInfo.fieldIndex}  submit:${formInfo.submitSelector || 'Enter'}  frame:${activeSession === session ? 'main' : 'iframe'}`)
         );
 
-        // All subsequent steps use the session that owns the form
         const activeDeps    = this._buildDeps(activeSession);
         const fieldFiller   = new FieldFiller(activeDeps);
         const formSubmitter = new FormSubmitter(activeDeps);
@@ -461,12 +426,7 @@ class EmailFillCollector extends BaseCollector {
         await this._sleep(POST_SUBMIT_DELAY);
         this._log(C.plain('Submission dispatched — response captured by HAR collector'));
 
-        // ── Record submission timestamps ─────────────────────────────────────────────
-        const submittedAt = Date.now();
-        this._result.formSubmitedAt          = submittedAt;
-        this._result.formSubmitedAtRelativeMs = submittedAt - this._testStarted;
-
-        // ── Screenshot ───────────────────────────────────────────────────────────────
+        // ── Step 7: Screenshot ───────────────────────────────────────────────────────
         await new Promise(resolve => {
             const onDone = () => {
                 this._bus.off(SCREENSHOT_TAKEN, onDone);
@@ -478,6 +438,11 @@ class EmailFillCollector extends BaseCollector {
             this._bus.emit(SCREENSHOT_REQUESTED, 'form_submitted');
         });
         this._log(C.dim('Screenshot taken after form submission'));
+
+        // ── Timestamps ───────────────────────────────────────────────────────────────
+        const submittedAt = Date.now();
+        this._result.popupActionedAt           = submittedAt;
+        this._result.popupActionedAtRelativeMs = submittedAt - this._testStarted;
 
         return true;
     }
@@ -520,8 +485,6 @@ class EmailFillCollector extends BaseCollector {
 
     /**
      * Evaluate in the main session.
-     * Kept for backward compatibility — helpers injected via _buildDeps use
-     * _evaluateIn scoped to their own session.
      *
      * @param {string}  expression
      * @param {boolean} [awaitPromise=false]

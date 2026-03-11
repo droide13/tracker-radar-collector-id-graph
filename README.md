@@ -216,9 +216,7 @@ Finds newsletter and email signup forms on a page and submits them using human-l
 
 #### How it works
 
-After page load, tries to find and fill an email form on the current page.
-If none is found, scans links for newsletter-related keywords and visits up to 6 candidate pages.
-On each candidate: checks for CAPTCHA (records type but continues regardless), fills required ancillary fields (selects, checkboxes), types the email with realistic keystroke timing, then clicks submit.
+After page load, tries to find and fill an email form on the current page. If none is found, scans links for newsletter-related keywords and visits up to 6 candidate pages. On each candidate: checks for CAPTCHA (records type but continues regardless), fills required ancillary fields (selects, checkboxes), types the email with realistic keystroke timing, clicks submit, then takes a screenshot of the page response.
 
 #### Registration
 
@@ -238,6 +236,9 @@ emailFill?: {
     submissionSucceeded: boolean;
     formUrl: string | null;
     visitedLinks: string[];
+    popupInfo: { cmp: string; action: string; timestamp: number; relativeMs: number } | null;
+    popupActionedAt: number | null;
+    popupActionedAtRelativeMs: number | null;
     error: string | null;
 };
 ```
@@ -290,36 +291,36 @@ npm run crawl -- -u "https://example.com" -d emailFill -v -o ./data/captures
 | captchaBlocked | boolean | true only if a CAPTCHA prevented submission entirely |
 | formUrl | string\|null | URL where submission occurred |
 | visitedLinks | string[] | Candidate pages navigated to |
+| popupInfo | object\|null | Payload from POPUP_ACCEPTED event if cookiePopupsCollector actioned a consent wall |
+| popupActionedAt | number\|null | Unix timestamp (ms) when the form was successfully submitted |
+| popupActionedAtRelativeMs | number\|null | Milliseconds elapsed from test start to form submission |
 | error | string\|null | Unhandled exception message, if any |
 
 #### Form detection
 
 Forms are scored by keyword density (newsletter, subscribe, signup, …) across textContent, id, class, and action. Forms containing password, login, checkout, or payment fields are disqualified. The email input is matched by type="email" or name/placeholder/id containing email. Standalone inputs outside a `<form>` (common in footers) are supported as a fallback.
 
-#### Consent wall handling (work in progress)
+#### Consent wall handling
 
-The crawler never genuinely accepts consent — it suppresses consent walls to reach the newsletter form underneath.
+Consent wall dismissal is fully owned by `cookiePopupsCollector`, which runs its `interact()` phase before this collector. `EmailFillCollector` no longer injects CMP cookies/localStorage flags and no longer clicks any consent buttons.
 
-Two layers run automatically:
-
-1. **Pre-render injection** — fires before the first page paint by setting well-known CMP cookies (OneTrust, Didomi, Cookiebot) and localStorage flags. Prevents most walls from mounting at all.
-2. **Runtime click fallback** — if a wall survived the injection (e.g. server-side verified CMPs), the crawler clicks its dismiss button and waits 1500 ms before continuing. Only buttons whose text unambiguously matches "accept all" in multiple languages are targeted — paywall and registration buttons are explicitly excluded.
+If a consent popup was actioned, `EmailFillCollector` waits an additional `POST_POPUP_SETTLE_MS` (1500 ms) before scanning for forms to allow the page to re-render. The `POPUP_ACCEPTED` bus event payload is recorded in `result.popupInfo` for diagnostics.
 
 Known limitation: sites that re-render the consent wall after each navigation may still intermittently block access.
 
-#### Cross-origin iframe forms (work in progress)
+#### Cross-origin iframe forms
 
 Some newsletter forms are embedded in cross-origin iframes (e.g. a publisher's subscription subdomain served inside the main site). The main page frame cannot see their DOM, which previously caused the wrong button to be clicked.
 
-`addTarget()` now collects a CDP session for every non-noise iframe. If form detection returns nothing in the main frame, each iframe session is probed in turn. Whichever session owns the form is used for all subsequent steps — field filling, ancillary fields, and submit all run in the correct frame context.
+`addTarget()` collects a CDP session for every non-noise iframe. If form detection returns nothing in the main frame, each iframe session is probed in turn. Whichever session owns the form is used for all subsequent steps — field filling, ancillary fields, and submit all run in the correct frame context.
 
 Known third-party iframes that are skipped: reCAPTCHA, hCaptcha, Cloudflare Turnstile, Google Tag Manager, Google Analytics, DoubleClick, Facebook plugins, YouTube embeds.
 
 Known limitation: deeply nested iframes (iframe inside iframe) are not probed.
 
-#### Submit button / scroll fix (work in progress)
+#### Screenshot on submission
 
-`getBoundingClientRect()` returns viewport-relative coordinates at the moment of the call. If the submit button is below the fold, the raw coordinates point to empty space and the CDP click misses. `FormSubmitter` now calls `scrollIntoView()` on the resolved button before clicking, then re-reads the rect to get updated viewport coordinates.
+After form submission and the `POST_SUBMIT_DELAY` wait, the collector emits `SCREENSHOT_REQUESTED` with the label `form_submitted` on the event bus and waits for `SCREENSHOT_TAKEN` or `SCREENSHOT_ERR` before continuing. This guarantees the screenshot is taken after the page has had time to respond to the submission.
 
 #### Ancillary field filling
 
@@ -352,7 +353,7 @@ Detected via: `iframe[src*="recaptcha"]`, `iframe[src*="hcaptcha"]`, `iframe[src
 
 #### Tunable constants
 
-`NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (6) · `POST_NAVIGATE_DELAY` (4500 ms) · `POST_SUBMIT_DELAY` (3000 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
+`NEWSLETTER_KEYWORDS` · `SUBMIT_TEXT_PATTERNS` · `CAPTCHA_SELECTORS` · `MAX_CANDIDATE_LINKS` (6) · `POST_NAVIGATE_DELAY` (4500 ms) · `POST_SUBMIT_DELAY` (3000 ms) · `POST_POPUP_SETTLE_MS` (1500 ms) · `TYPING_DELAY_MIN_MS` (60) · `TYPING_DELAY_MAX_MS` (180) · `MOUSE_MOVE_STEPS` (8)
 
 All constants are in helpers/emailHelpers/constants.js.
 

@@ -26,7 +26,7 @@ const {
     NEWSLETTER_KEYWORDS,
     SUBMIT_TEXT_PATTERNS,
     MAX_CANDIDATE_LINKS
-} = require('./constants');
+} = require('./emailConstants');
 
 class FormDetector {
 

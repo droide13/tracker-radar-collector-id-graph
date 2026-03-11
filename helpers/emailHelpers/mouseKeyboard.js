@@ -24,7 +24,7 @@
  *   ease-in-out speed profile for more realistic deceleration near the target.
  */
 
-const { MOUSE_MOVE_STEPS } = require('./constants');
+const { MOUSE_MOVE_STEPS } = require('./emailConstants');
 
 class MouseKeyboard {
 

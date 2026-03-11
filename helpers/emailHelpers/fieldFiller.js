@@ -29,7 +29,7 @@
 
 const MouseKeyboard = require('./mouseKeyboard');
 const loadIdentity  = require('./loadIdentity');
-const { TYPING_DELAY_MIN_MS, TYPING_DELAY_MAX_MS } = require('./constants');
+const { TYPING_DELAY_MIN_MS, TYPING_DELAY_MAX_MS } = require('./emailConstants');
 
 class FieldFiller extends MouseKeyboard {
 
