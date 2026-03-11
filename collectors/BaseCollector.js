@@ -35,6 +35,16 @@ class BaseCollector {
     }
 
     /**
+     * Called after the page has loaded and all other collectors have completed
+     * their interact() phase. Can be async, can throw errors.
+     *
+     * @returns {Promise<void>|Object}
+     */
+    interact() {
+        return Promise.resolve();
+    }
+    
+    /**
      * Called after the crawl to retrieve the data. Can be async, can throw errors.
      *
      * @param {{finalUrl: string, urlFilter?: function(string):boolean}} options
